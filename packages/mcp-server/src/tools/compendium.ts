@@ -17,6 +17,7 @@ import {
   type GenericFilters,
 } from '../utils/compendium-filters.js';
 import { readDerived } from '../systems/cosmere-rpg/constants.js';
+import { getMonsterRole, parseNimbleLevel } from '../systems/nimble/constants.js';
 
 export interface CompendiumToolsOptions {
   foundryClient: FoundryClient;
@@ -194,7 +195,7 @@ export class CompendiumTools {
       {
         name: 'list-creatures-by-criteria',
         description:
-          'MULTI-SYSTEM CREATURE DISCOVERY: Get a comprehensive list of creatures matching specific criteria. Supports D&D 5e (Challenge Rating), Pathfinder 2e (Level), and Cosmere RPG (Tier/Role/Investiture) with automatic system detection. Perfect for encounter building - returns minimal data so Claude can use built-in monster knowledge to identify suitable creatures by name, then pull full details only for final selections. Features intelligent pack prioritization and high result limits for complete surveys.',
+          'MULTI-SYSTEM CREATURE DISCOVERY: Get a comprehensive list of creatures matching specific criteria. Supports D&D 5e (Challenge Rating), Pathfinder 2e (Level), Cosmere RPG (Tier/Role/Investiture), and Nimble (Level/Role/Armor) with automatic system detection. Perfect for encounter building - returns minimal data so Claude can use built-in monster knowledge to identify suitable creatures by name, then pull full details only for final selections. Features intelligent pack prioritization and high result limits for complete surveys.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -216,23 +217,8 @@ export class CompendiumTools {
             },
             creatureType: {
               type: 'string',
-              description: 'Filter by creature type',
-              enum: [
-                'humanoid',
-                'dragon',
-                'beast',
-                'undead',
-                'fey',
-                'fiend',
-                'celestial',
-                'construct',
-                'elemental',
-                'giant',
-                'monstrosity',
-                'ooze',
-                'plant',
-                'aberration',
-              ],
+              description:
+                'Filter by creature type. D&D 5e/PF2e: humanoid, dragon, beast, undead, fey, fiend, celestial, construct, elemental, giant, monstrosity, ooze, plant, aberration. Nimble: free text, case-insensitive substring match (e.g. "goblin", "undead").',
             },
             size: {
               type: 'string',
@@ -261,7 +247,8 @@ export class CompendiumTools {
                   description: 'Level range object (e.g., {"min": 10, "max": 15})',
                 },
               ],
-              description: 'Filter by creature level (Pathfinder 2e, -1 to 25+)',
+              description:
+                'Filter by creature level (Pathfinder 2e, -1 to 25+; Nimble 1/4 to 20+, fractions like "1/4" or 0.25 accepted)',
             },
             traits: {
               type: 'array',
@@ -292,7 +279,7 @@ export class CompendiumTools {
             role: {
               type: 'string',
               description:
-                'Filter by adversary role (Cosmere RPG). Common values: "minion", "rival", "boss". Case-insensitive.',
+                'Filter by role. Cosmere RPG: "minion", "rival", "boss". Nimble: "minion", "flunky", "standard", "solo". Case-insensitive.',
             },
             hasInvestiture: {
               type: 'boolean',
@@ -310,7 +297,7 @@ export class CompendiumTools {
                   description: 'Health/HP range object (e.g., {"min": 30, "max": 80})',
                 },
               ],
-              description: 'Filter by max health/HP (Cosmere RPG; cross-system field)',
+              description: 'Filter by max health/HP (Cosmere RPG, Nimble; cross-system field)',
             },
             defensesMin: {
               type: 'object',
@@ -326,6 +313,20 @@ export class CompendiumTools {
             deflectMin: {
               type: 'number',
               description: 'Minimum Deflect rating (Cosmere RPG)',
+            },
+            // Nimble specific filters
+            armor: {
+              type: 'string',
+              enum: ['none', 'medium', 'heavy'],
+              description: 'Filter by armor (Nimble)',
+            },
+            hasBloodied: {
+              type: 'boolean',
+              description: 'Filter for monsters with a Bloodied feature (Nimble)',
+            },
+            hasLastStand: {
+              type: 'boolean',
+              description: 'Filter for monsters with a Last Stand feature (Nimble)',
             },
             limit: {
               type: 'number',
@@ -504,6 +505,14 @@ export class CompendiumTools {
     // Detect game system for appropriate filtering
     const gameSystem = await this.getGameSystem();
 
+    const booleanish = z.union([
+      z.boolean(),
+      z
+        .string()
+        .refine(val => ['true', 'false'].includes(val.toLowerCase()))
+        .transform(val => val.toLowerCase() === 'true'),
+    ]);
+
     // Use generic filters schema to support both systems
     const schema = z.object({
       // D&D 5e: challengeRating
@@ -580,8 +589,10 @@ export class CompendiumTools {
           z.number(),
           z
             .string()
-            .refine(val => !isNaN(parseFloat(val)))
-            .transform(val => parseFloat(val)),
+            .refine(val => parseNimbleLevel(val) !== undefined, {
+              message: 'Level must be a number or fraction (e.g. "3" or "1/4")',
+            })
+            .transform(val => parseNimbleLevel(val) as number),
         ])
         .optional(),
 
@@ -689,6 +700,11 @@ export class CompendiumTools {
         ])
         .optional(),
 
+      // Nimble specific
+      armor: z.enum(['none', 'medium', 'heavy']).optional(),
+      hasBloodied: booleanish.optional(),
+      hasLastStand: booleanish.optional(),
+
       // Spellcasting flags (different names per system)
       hasSpells: z
         .union([
@@ -779,7 +795,7 @@ export class CompendiumTools {
         criteria: params,
         searchSummary: {
           ...searchSummary,
-          searchStrategy: `Prioritized pack search - ${gameSystem === 'pf2e' ? 'PF2e' : gameSystem === 'cosmere-rpg' ? 'Cosmere RPG' : gameSystem === 'mgt2e' ? 'Mongoose Traveller 2e' : 'D&D 5e'} content first, then modules, then campaign-specific`,
+          searchStrategy: `Prioritized pack search - ${gameSystem === 'pf2e' ? 'PF2e' : gameSystem === 'cosmere-rpg' ? 'Cosmere RPG' : gameSystem === 'mgt2e' ? 'Mongoose Traveller 2e' : gameSystem === 'nimble' ? 'Nimble' : 'D&D 5e'} content first, then modules, then campaign-specific`,
           note: 'Packs searched in priority order to find most relevant creatures first',
         },
         optimizationNote:
@@ -849,11 +865,25 @@ export class CompendiumTools {
 
     // Add key stats for actors/creatures to reduce need for detail calls.
     // `adversary` is Cosmere RPG's NPC equivalent.
-    if (item.type === 'npc' || item.type === 'character' || item.type === 'adversary') {
+    if (
+      item.type === 'npc' ||
+      item.type === 'character' ||
+      item.type === 'adversary' ||
+      (gameSystem === 'nimble' && (item.type === 'minion' || item.type === 'soloMonster'))
+    ) {
       const stats: any = {};
 
       // Use system detection utilities for accurate stat extraction
-      if (gameSystem === 'mgt2e') {
+      if (gameSystem === 'nimble') {
+        const system = item.system || {};
+        if (system.details?.level !== undefined) stats.level = String(system.details.level);
+        const role = getMonsterRole(item.type, system.details?.isFlunky);
+        if (role) stats.role = role;
+        if (system.details?.creatureType) stats.creatureType = system.details.creatureType;
+        if (system.attributes?.sizeCategory) stats.size = system.attributes.sizeCategory;
+        if (system.attributes?.armor) stats.armor = system.attributes.armor;
+        if (system.attributes?.hp?.max !== undefined) stats.hitPoints = system.attributes.hp.max;
+      } else if (gameSystem === 'mgt2e') {
         // Mongoose Traveller 2e: extract relevant stats for creatures/travellers
         const system = item.system || {};
         if (item.type === 'creature') {
@@ -1083,6 +1113,26 @@ export class CompendiumTools {
       pack: { id: creature.pack, label: creature.packLabel },
     };
 
+    if (gameSystem === 'nimble') {
+      // Nimble fields come pre-flattened from data-access.ts; pass them through.
+      for (const key of [
+        'type',
+        'level',
+        'role',
+        'creatureType',
+        'size',
+        'armor',
+        'hitPoints',
+        'movement',
+        'hasBloodied',
+        'hasLastStand',
+        'summary',
+      ]) {
+        if (creature[key] !== undefined && creature[key] !== '') formatted[key] = creature[key];
+      }
+      return formatted;
+    }
+
     if (gameSystem === 'cosmere-rpg') {
       // Cosmere fields come pre-flattened from data-access.ts; pass them through.
       if (creature.tier !== undefined) formatted.tier = creature.tier;
@@ -1267,6 +1317,29 @@ export class CompendiumTools {
         if (spi !== undefined) parts.push(`spi>=${spi}`);
       }
       if (params.deflectMin !== undefined) parts.push(`deflect>=${params.deflectMin}`);
+    } else if (gameSystem === 'nimble') {
+      if (params.level !== undefined) {
+        if (typeof params.level === 'number') {
+          parts.push(`Level ${params.level}`);
+        } else if (typeof params.level === 'object') {
+          parts.push(`Level ${params.level.min ?? 0}-${params.level.max ?? 30}`);
+        }
+      }
+      if (params.role) parts.push(`role=${String(params.role).toLowerCase()}`);
+      if (params.armor) parts.push(`${params.armor} armor`);
+      if (params.hitPoints !== undefined) {
+        parts.push(
+          typeof params.hitPoints === 'number'
+            ? `hp=${params.hitPoints}`
+            : `hp ${params.hitPoints.min ?? 0}-${params.hitPoints.max ?? '∞'}`
+        );
+      }
+      if (params.hasBloodied !== undefined) {
+        parts.push(params.hasBloodied ? 'has Bloodied' : 'no Bloodied');
+      }
+      if (params.hasLastStand !== undefined) {
+        parts.push(params.hasLastStand ? 'has Last Stand' : 'no Last Stand');
+      }
     }
 
     if (params.creatureType) parts.push(params.creatureType);

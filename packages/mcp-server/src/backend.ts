@@ -1175,6 +1175,7 @@ async function startBackend(): Promise<void> {
   const { CosmereRpgAdapter } = await import('./systems/cosmere-rpg/adapter.js');
   const { WFRP4eAdapter } = await import('./systems/wfrp4e/adapter.js');
   const { MGT2eAdapter } = await import('./systems/mgt2e/adapter.js');
+  const { NimbleAdapter } = await import('./systems/nimble/adapter.js');
 
   const systemRegistry = getSystemRegistry(logger);
   systemRegistry.register(new DnD5eAdapter());
@@ -1183,6 +1184,7 @@ async function startBackend(): Promise<void> {
   systemRegistry.register(new CosmereRpgAdapter());
   systemRegistry.register(new WFRP4eAdapter());
   systemRegistry.register(new MGT2eAdapter());
+  systemRegistry.register(new NimbleAdapter());
 
   logger.info('System registry initialized', {
     supportedSystems: systemRegistry.getSupportedSystems(),

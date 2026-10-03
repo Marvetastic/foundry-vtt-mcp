@@ -11,7 +11,15 @@ import { Logger } from '../logger.js';
 /**
  * Supported game systems
  */
-export type GameSystem = 'dnd5e' | 'pf2e' | 'cosmere-rpg' | 'dsa5' | 'wfrp4e' | 'mgt2e' | 'other';
+export type GameSystem =
+  | 'dnd5e'
+  | 'pf2e'
+  | 'cosmere-rpg'
+  | 'dsa5'
+  | 'wfrp4e'
+  | 'mgt2e'
+  | 'nimble'
+  | 'other';
 
 /**
  * Cache for system detection (avoid repeated queries)
@@ -53,6 +61,8 @@ export async function detectGameSystem(
       cachedSystem = 'dsa5';
     } else if (systemId === 'wfrp4e') {
       cachedSystem = 'wfrp4e';
+    } else if (systemId === 'nimble') {
+      cachedSystem = 'nimble';
     } else {
       cachedSystem = 'other';
     }

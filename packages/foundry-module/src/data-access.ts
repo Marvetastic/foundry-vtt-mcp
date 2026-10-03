@@ -158,12 +158,49 @@ interface MGT2eCreatureIndex {
   img?: string;
 }
 
+// Nimble Enhanced Creature Index
+//
+// Nimble monsters are npc / minion / soloMonster actors. The level is stored
+// as a string ("1/4", "3"); `level` is its numeric value and `levelLabel` the
+// original. `nimbleRole` doubles as the discriminator for this index shape.
+interface NimbleCreatureIndex {
+  id: string;
+  name: string;
+  type: string; // npc | minion | soloMonster
+  pack: string;
+  packLabel: string;
+  level: number;
+  levelLabel: string;
+  nimbleRole: 'minion' | 'flunky' | 'standard' | 'solo';
+  creatureType: string;
+  size: string;
+  armor: string; // none | medium | heavy
+  hitPoints: number;
+  movement: Record<string, number>;
+  hasBloodied: boolean;
+  hasLastStand: boolean;
+  img?: string;
+}
+
 // Union type across all supported systems
 type EnhancedCreatureIndex =
   | DnD5eCreatureIndex
   | PF2eCreatureIndex
   | CosmereRpgCreatureIndex
-  | MGT2eCreatureIndex;
+  | MGT2eCreatureIndex
+  | NimbleCreatureIndex;
+
+function isNimbleCreature(c: EnhancedCreatureIndex): c is NimbleCreatureIndex {
+  return 'nimbleRole' in c;
+}
+
+/** Parse a Nimble level string ("1/4", "3") to a number; NaN when unparseable. */
+function parseNimbleLevel(level: unknown): number {
+  const text = String(level ?? '').trim();
+  const fraction = /^(\d+)\s*\/\s*(\d+)$/.exec(text);
+  if (fraction) return Number(fraction[1]) / Number(fraction[2]);
+  return text === '' ? NaN : Number(text);
+}
 
 interface PersistentIndexMetadata {
   version: string;
@@ -667,6 +704,8 @@ class PersistentCreatureIndex {
       return await this.buildCosmereRpgIndex(force);
     } else if (gameSystem === 'mgt2e') {
       return await this.buildMGT2eIndex(force);
+    } else if (gameSystem === 'nimble') {
+      return await this.buildNimbleIndex(force);
     } else {
       // Unknown system — skip silently rather than blocking world load
       console.warn(
@@ -1511,6 +1550,132 @@ class PersistentCreatureIndex {
         }
       }
     } catch {
+      errors++;
+    }
+
+    return { creatures, errors };
+  }
+
+  // ─── nimble index builder ───────────────────────────────────────────────────
+
+  private async buildNimbleIndex(_force = false): Promise<NimbleCreatureIndex[]> {
+    this.buildInProgress = true;
+    const startTime = Date.now();
+    let totalErrors = 0;
+
+    try {
+      const actorPacks = Array.from(game.packs.values()).filter(
+        pack => pack.metadata.type === 'Actor'
+      );
+      const enhancedCreatures: NimbleCreatureIndex[] = [];
+      const packFingerprints = new Map<string, PackFingerprint>();
+
+      this.info(`Starting Nimble monster index build from ${actorPacks.length} packs...`);
+
+      for (const pack of actorPacks) {
+        if (!pack.indexed) await pack.getIndex({});
+        packFingerprints.set(pack.metadata.id, this.generatePackFingerprint(pack));
+
+        try {
+          const result = await this.extractNimbleDataFromPack(pack);
+          enhancedCreatures.push(...result.creatures);
+          totalErrors += result.errors;
+        } catch (error) {
+          console.warn(`[${this.moduleId}] Failed to process pack ${pack.metadata.label}:`, error);
+          totalErrors++;
+        }
+      }
+
+      await this.savePersistedIndex({
+        metadata: {
+          version: this.INDEX_VERSION,
+          timestamp: Date.now(),
+          packFingerprints,
+          totalCreatures: enhancedCreatures.length,
+          gameSystem: 'nimble',
+        },
+        creatures: enhancedCreatures,
+      });
+
+      const secs = Math.round((Date.now() - startTime) / 1000);
+      const errText = totalErrors > 0 ? ` (${totalErrors} errors)` : '';
+      this.info(
+        `Nimble monster index complete! ${enhancedCreatures.length} monsters indexed in ${secs}s${errText}`
+      );
+
+      return enhancedCreatures;
+    } catch (error) {
+      const msg = `Failed to build Nimble monster index: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      console.error(`[${this.moduleId}] ${msg}`);
+      ui.notifications?.error(msg);
+      throw error;
+    } finally {
+      this.buildInProgress = false;
+    }
+  }
+
+  private async extractNimbleDataFromPack(
+    pack: any
+  ): Promise<{ creatures: NimbleCreatureIndex[]; errors: number }> {
+    const creatures: NimbleCreatureIndex[] = [];
+    let errors = 0;
+
+    try {
+      const documents = await pack.getDocuments();
+      for (const doc of documents) {
+        if (!['npc', 'minion', 'soloMonster'].includes(doc.type)) continue;
+
+        try {
+          const system = doc.system ?? {};
+          const attributes = system.attributes ?? {};
+          const details = system.details ?? {};
+          const subtypes = Array.from(doc.items ?? [])
+            .filter((i: any) => i.type === 'monsterFeature')
+            .map((i: any) => i.system?.subtype);
+
+          const movement: Record<string, number> = {};
+          for (const mode of ['walk', 'fly', 'swim', 'climb', 'burrow']) {
+            const speed = Number(attributes.movement?.[mode] ?? 0);
+            if (speed > 0 || mode === 'walk') movement[mode] = speed;
+          }
+
+          const nimbleRole =
+            doc.type === 'minion'
+              ? 'minion'
+              : doc.type === 'soloMonster'
+                ? 'solo'
+                : details.isFlunky
+                  ? 'flunky'
+                  : 'standard';
+
+          creatures.push({
+            id: doc.id,
+            name: doc.name,
+            type: doc.type,
+            pack: pack.collection,
+            packLabel: pack.metadata?.label ?? pack.collection,
+            level: parseNimbleLevel(details.level),
+            levelLabel: String(details.level ?? ''),
+            nimbleRole,
+            creatureType: details.creatureType ?? '',
+            size: attributes.sizeCategory ?? 'medium',
+            armor: attributes.armor ?? 'none',
+            hitPoints: Number(attributes.hp?.max ?? 0),
+            movement,
+            hasBloodied: subtypes.includes('bloodied'),
+            hasLastStand: subtypes.includes('lastStand'),
+            img: doc.img,
+          });
+        } catch (error) {
+          console.warn(`[${this.moduleId}] Failed to extract Nimble data from ${doc.name}:`, error);
+          errors++;
+        }
+      }
+    } catch (error) {
+      console.warn(
+        `[${this.moduleId}] Failed to load documents from ${pack.metadata.label}:`,
+        error
+      );
       errors++;
     }
 
@@ -3175,6 +3340,7 @@ export class FoundryDataAccess {
       // Sort by power level then name for consistent ordering (system-aware).
       // Power-level dial: tier (cosmere), level (pf2e), challengeRating (dnd5e).
       const powerLevel = (c: EnhancedCreatureIndex): number => {
+        if (isNimbleCreature(c)) return Number.isNaN(c.level) ? 0 : c.level;
         if ('hits' in c && 'hasPsionics' in c) return (c as MGT2eCreatureIndex).hits;
         if ('tier' in c) return (c as CosmereRpgCreatureIndex).tier;
         if ('level' in c) return (c as PF2eCreatureIndex).level;
@@ -3194,6 +3360,32 @@ export class FoundryDataAccess {
 
       // Convert enhanced creatures to result format (system-aware)
       const results = filteredCreatures.map(creature => {
+        if (isNimbleCreature(creature)) {
+          const n = creature;
+          const extraMovement = Object.entries(n.movement)
+            .filter(([mode]) => mode !== 'walk')
+            .map(([mode, speed]) => `, ${mode} ${speed}`)
+            .join('');
+          return {
+            id: n.id,
+            name: n.name,
+            type: n.type,
+            pack: n.pack,
+            packLabel: n.packLabel,
+            hasImage: !!n.img,
+            level: n.levelLabel,
+            role: n.nimbleRole,
+            creatureType: n.creatureType,
+            size: n.size,
+            armor: n.armor,
+            hitPoints: n.hitPoints,
+            movement: n.movement,
+            hasBloodied: n.hasBloodied,
+            hasLastStand: n.hasLastStand,
+            summary: `Level ${n.levelLabel} ${n.nimbleRole}${n.creatureType ? ` ${n.creatureType}` : ''},${n.hitPoints} HP, ${n.armor} armor, ${n.size}${extraMovement} from ${n.packLabel}`,
+          };
+        }
+
         const isMGT2e = 'hits' in creature && 'hasPsionics' in creature;
         const isCosmere = !isMGT2e && 'tier' in creature;
         const isPF2e = !isMGT2e && !isCosmere && 'level' in creature;
@@ -3322,6 +3514,9 @@ export class FoundryDataAccess {
    * narrowest signal), then pf2e, then fall through to dnd5e.
    */
   private passesEnhancedCriteria(creature: EnhancedCreatureIndex, criteria: any): boolean {
+    if (isNimbleCreature(creature)) {
+      return this.passesNimbleCriteria(creature, criteria);
+    }
     if ('hits' in creature && 'hasPsionics' in creature) {
       return this.passesMGT2eCriteria(creature as MGT2eCreatureIndex, criteria);
     }
@@ -3332,6 +3527,45 @@ export class FoundryDataAccess {
       return this.passesPF2eCriteria(creature, criteria);
     }
     return this.passesDnD5eCriteria(creature, criteria);
+  }
+
+  /**
+   * Nimble criteria filter — level (number or range), role, creatureType
+   * (substring), size, armor, hitPoints (number or range), hasBloodied,
+   * hasLastStand.
+   */
+  private passesNimbleCriteria(creature: NimbleCreatureIndex, criteria: any): boolean {
+    const inRange = (value: number, filter: number | { min?: number; max?: number }) => {
+      if (typeof filter === 'number') return value === filter;
+      if (filter.min !== undefined && value < filter.min) return false;
+      if (filter.max !== undefined && value > filter.max) return false;
+      return true;
+    };
+
+    if (criteria.level !== undefined && !inRange(creature.level, criteria.level)) return false;
+    if (criteria.role) {
+      const role = String(criteria.role).toLowerCase();
+      const wanted = role === 'legendary' || role === 'solomonster' ? 'solo' : role;
+      if (creature.nimbleRole !== wanted) return false;
+    }
+    if (
+      criteria.creatureType &&
+      !creature.creatureType.toLowerCase().includes(String(criteria.creatureType).toLowerCase())
+    ) {
+      return false;
+    }
+    if (criteria.size && creature.size !== String(criteria.size).toLowerCase()) return false;
+    if (criteria.armor && creature.armor !== criteria.armor) return false;
+    if (criteria.hitPoints !== undefined && !inRange(creature.hitPoints, criteria.hitPoints)) {
+      return false;
+    }
+    if (criteria.hasBloodied !== undefined && creature.hasBloodied !== criteria.hasBloodied) {
+      return false;
+    }
+    if (criteria.hasLastStand !== undefined && creature.hasLastStand !== criteria.hasLastStand) {
+      return false;
+    }
+    return true;
   }
 
   /**
@@ -10814,6 +11048,24 @@ export class FoundryDataAccess {
           software: { class: 'spacecraft', type: 'generic', interface: 'none', bandwidth: 0 },
           ...systemData,
         };
+      }
+
+      // Nimble monsters: size the prototype token from sizeCategory, using the
+      // same map as the system's own stat-block importer. The system's
+      // _preCreate hooks only set sight/disposition/actorLink, not dimensions.
+      if (gameSystemId === 'nimble' && ['npc', 'minion', 'soloMonster'].includes(a.type)) {
+        const NIMBLE_TOKEN_SIZES: Record<string, number> = {
+          tiny: 0.5,
+          small: 0.5,
+          medium: 1,
+          large: 2,
+          huge: 3,
+          gargantuan: 4,
+        };
+        const tokenSize = NIMBLE_TOKEN_SIZES[systemData.attributes?.sizeCategory];
+        if (tokenSize !== undefined) {
+          doc.prototypeToken = { width: tokenSize, height: tokenSize };
+        }
       }
 
       doc.system = systemData;
