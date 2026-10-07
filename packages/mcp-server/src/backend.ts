@@ -30,6 +30,8 @@ import { EffectManagementTools } from './tools/effect-management.js';
 import { QuestCreationTools } from './tools/quest-creation.js';
 import { JournalManagementTools } from './tools/journal-management.js';
 import { NimbleLevelUpGrantsTools } from './tools/nimble/level-up-grants.js';
+import { NimbleCharacterBuilderTools } from './tools/nimble/character-builder.js';
+import { CombatTestingTools } from './tools/combat-testing.js';
 
 import { DiceRollTools } from './tools/dice-roll.js';
 
@@ -1215,6 +1217,8 @@ async function startBackend(): Promise<void> {
   const questCreationTools = new QuestCreationTools({ foundryClient, logger });
   const journalManagementTools = new JournalManagementTools({ foundryClient, logger });
   const nimbleLevelUpGrantsTools = new NimbleLevelUpGrantsTools({ foundryClient, logger });
+  const nimbleCharacterBuilderTools = new NimbleCharacterBuilderTools({ foundryClient, logger });
+  const combatTestingTools = new CombatTestingTools({ foundryClient, logger });
 
   const diceRollTools = new DiceRollTools({ foundryClient, logger });
 
@@ -1444,6 +1448,9 @@ async function startBackend(): Promise<void> {
     ...journalManagementTools.getToolDefinitions(),
 
     ...nimbleLevelUpGrantsTools.getToolDefinitions(),
+    ...nimbleCharacterBuilderTools.getToolDefinitions(),
+
+    ...combatTestingTools.getToolDefinitions(),
 
     ...diceRollTools.getToolDefinitions(),
 
@@ -1696,6 +1703,28 @@ async function startBackend(): Promise<void> {
 
                 case 'check-level-up-grants':
                   result = await nimbleLevelUpGrantsTools.handleCheckLevelUpGrants(args);
+
+                  break;
+
+                case 'build-nimble-character':
+                  result = await nimbleCharacterBuilderTools.handleBuildCharacter(args);
+
+                  break;
+
+                // Combat testing tools
+
+                case 'read-chat-log':
+                  result = await combatTestingTools.handleReadChatLog(args);
+
+                  break;
+
+                case 'manage-combat':
+                  result = await combatTestingTools.handleManageCombat(args);
+
+                  break;
+
+                case 'apply-to-token':
+                  result = await combatTestingTools.handleApplyToToken(args);
 
                   break;
 
