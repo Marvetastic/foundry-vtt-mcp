@@ -17,6 +17,12 @@
  *   outcome — crit → ['criticalHit', 'hit'], miss → ['miss'], else ['hit'];
  *   applyHealing() records each applied healing node in system.appliedHealing.
  *   Applying damage is not recorded on the card.
+ * - models/chat/common.ts  incomingReactions(): pending offers stamped on the
+ *   card (forceReroll, redirectToSelf = Interpose, spendPoolForDamage), built by
+ *   utils/incomingAttackModifiers.ts for the FIRST target only: allied living
+ *   characters within 2 spaces (baseline) or a modifyIncomingAttack
+ *   redirectToSelf rule within its own range. view/chat/components/
+ *   IncomingReactionPrompts.svelte renders them (button label, who may click).
  */
 
 export interface ChatMessageSource {
@@ -45,6 +51,185 @@ export interface ChatLogResolvers {
   tokenName?: (tokenUuidOrId: string) => string | null | undefined;
   itemName?: (itemUuid: string) => string | null | undefined;
   userName?: (userId: string) => string | null | undefined;
+  /** Name of any document uuid (actor, token, item). */
+  uuidName?: (uuid: string) => string | null | undefined;
+  /** Names of the non-GM users who own the actor with this uuid. */
+  actorOwners?: (actorUuid: string) => string[] | null | undefined;
+  /** The live modifyIncomingAttack rule behind a rule-sourced offer. */
+  reactionRule?: (
+    itemUuid: string,
+    ruleId: string
+  ) => { modifier?: string; range?: number; disabled?: boolean } | null | undefined;
+}
+
+/** A pending or used interactive offer on an attack card (system.incomingReactions). */
+export interface RawReactionEntry {
+  id?: string;
+  kind?: string;
+  source?: string;
+  actorUuid?: string;
+  tokenUuid?: string | null;
+  targetTokenUuid?: string | null;
+  label?: string;
+  ruleId?: string;
+  itemUuid?: string;
+  used?: boolean;
+  usedBy?: string | null;
+  rerollTrigger?: string;
+  rerollWithDisadvantage?: boolean;
+  outcomeTrigger?: string | null;
+  usedAmount?: number | null;
+  usedPoolLabel?: string;
+  usedFaces?: number[];
+}
+
+export interface ReactionOffer {
+  /** Position in system.incomingReactions; use-reaction accepts it as `offer`. */
+  index: number;
+  id: string;
+  kind: string;
+  source: string;
+  /** The button text Nimble shows (also accepted by use-reaction as `offer`). */
+  label: string;
+  used: boolean;
+  usedBy: string | null;
+  usedNote?: string;
+  reactingActor: { uuid: string; name: string | null } | null;
+  token: { uuid: string; name: string | null } | null;
+  /** The target this offer would take the hit for (redirectToSelf) or concerns. */
+  protects: { uuid: string; name: string | null } | null;
+  sourceItem: { uuid: string; name: string | null } | null;
+  ruleId: string | null;
+  /** Live rule data for rule-sourced redirects: modifier, range, disabled. */
+  rule?: { modifier?: string; range?: number; disabled?: boolean };
+  /** Who may take it: the GM always, plus these players (owners of the reacting actor). */
+  canBeTakenBy: string[];
+  /** Why it is on the card: range, rule and source item. */
+  why: string;
+  rerollTrigger?: string;
+  rerollWithDisadvantage?: boolean;
+  outcomeTrigger?: string | null;
+}
+
+const BASELINE_INTERPOSE_RANGE = 2;
+
+/** Button label as IncomingReactionPrompts.svelte builds it (English). */
+export function reactionButtonLabel(
+  entry: RawReactionEntry,
+  actorName: string | null,
+  featureName: string | null
+): string {
+  if (entry.kind === 'spendPoolForDamage') {
+    return featureName ? `Add Damage: ${featureName}` : 'Add Damage';
+  }
+  const heading =
+    entry.kind === 'forceReroll'
+      ? 'Force Reroll'
+      : entry.source === 'baseline'
+        ? 'Interpose (Heroic Reaction)'
+        : 'Interpose';
+  const source = entry.label ? `: ${entry.label}` : '';
+  return `${heading}${source} — ${actorName ?? ''}`;
+}
+
+function describeReactionWhy(
+  entry: RawReactionEntry,
+  names: { actor: string | null; protects: string | null; item: string | null },
+  rule: ReactionOffer['rule'] | undefined
+): string {
+  const who = names.actor ?? 'the reacting actor';
+  const item = names.item ? ` on "${names.item}"` : '';
+  if (entry.kind === 'redirectToSelf') {
+    const protects = names.protects ?? 'the target';
+    if (entry.source === 'baseline') {
+      return (
+        `Baseline Interpose: ${who} is a living allied character within ` +
+        `${BASELINE_INTERPOSE_RANGE} spaces of ${protects}. Taking it redirects the attack to ${who}; ` +
+        'in a started combat it spends their interpose heroic reaction and its action cost.'
+      );
+    }
+    const range = rule?.range ?? '?';
+    return (
+      `modifyIncomingAttack redirectToSelf rule${entry.label ? ` "${entry.label}"` : ''}${item}: ` +
+      `${who} is an allied, living token within ${range} spaces of ${protects} (range is measured when the ` +
+      'attack card is made; the rule replaces the baseline 2-space Interpose for this token). ' +
+      'Any action cost is left to the granting feature.'
+    );
+  }
+  if (entry.kind === 'forceReroll') {
+    return (
+      `modifyIncomingAttack forceReroll rule${entry.label ? ` "${entry.label}"` : ''}${item}: ` +
+      `the defender (${who}) may force the attack's damage roll to be rerolled` +
+      ` (trigger: ${entry.rerollTrigger ?? 'always'}${entry.rerollWithDisadvantage ? ', rerolled with disadvantage' : ''}).`
+    );
+  }
+  if (entry.kind === 'spendPoolForDamage') {
+    const offered = entry.outcomeTrigger ? ` (offered on ${entry.outcomeTrigger}).` : '.';
+    return (
+      `Attacker-side dice-pool spend${item}${entry.label ? ` (rule "${entry.label}")` : ''}: ` +
+      `${who} may spend dice from a pool to add damage to this attack${offered}`
+    );
+  }
+  return `Offer of kind "${entry.kind ?? 'unknown'}".`;
+}
+
+/** Turn system.incomingReactions into readable offers (who can take each, and why). */
+export function parseIncomingReactions(
+  entries: unknown,
+  resolvers: ChatLogResolvers = {}
+): ReactionOffer[] {
+  if (!Array.isArray(entries)) return [];
+  return entries.map((raw: RawReactionEntry, index) => {
+    const entry = raw ?? {};
+    const name = (uuid?: string | null) => (uuid ? (resolvers.uuidName?.(uuid) ?? null) : null);
+    const actorName = name(entry.actorUuid);
+    const itemName = name(entry.itemUuid);
+    const protectsName = name(entry.targetTokenUuid);
+    const rule =
+      entry.source === 'rule' && entry.itemUuid && entry.ruleId
+        ? (resolvers.reactionRule?.(entry.itemUuid, entry.ruleId) ?? undefined)
+        : undefined;
+
+    const offer: ReactionOffer = {
+      index,
+      id: String(entry.id ?? ''),
+      kind: String(entry.kind ?? 'unknown'),
+      source: String(entry.source ?? 'rule'),
+      label: reactionButtonLabel(entry, actorName, itemName),
+      used: entry.used === true,
+      usedBy: entry.usedBy ? (resolvers.userName?.(entry.usedBy) ?? entry.usedBy) : null,
+      reactingActor: entry.actorUuid ? { uuid: entry.actorUuid, name: actorName } : null,
+      token: entry.tokenUuid ? { uuid: entry.tokenUuid, name: name(entry.tokenUuid) } : null,
+      protects: entry.targetTokenUuid ? { uuid: entry.targetTokenUuid, name: protectsName } : null,
+      sourceItem: entry.itemUuid ? { uuid: entry.itemUuid, name: itemName } : null,
+      ruleId: entry.ruleId || null,
+      canBeTakenBy: [
+        'GM',
+        ...((entry.actorUuid && resolvers.actorOwners?.(entry.actorUuid)) || []),
+      ],
+      why: describeReactionWhy(
+        entry,
+        { actor: actorName, protects: protectsName, item: itemName },
+        rule
+      ),
+    };
+    if (rule) offer.rule = rule;
+    if (entry.kind === 'forceReroll') {
+      offer.rerollTrigger = entry.rerollTrigger ?? 'always';
+      offer.rerollWithDisadvantage = entry.rerollWithDisadvantage === true;
+    }
+    if (entry.outcomeTrigger) offer.outcomeTrigger = entry.outcomeTrigger;
+    if (offer.used) {
+      if (entry.kind === 'spendPoolForDamage' && typeof entry.usedAmount === 'number') {
+        offer.usedNote = `+${entry.usedAmount} damage from ${entry.usedPoolLabel ?? 'pool'} (dice ${(entry.usedFaces ?? []).join(', ')})`;
+      } else if (entry.kind === 'forceReroll') {
+        offer.usedNote = 'damage rerolled';
+      } else if (entry.kind === 'redirectToSelf') {
+        offer.usedNote = `attack redirected to ${actorName ?? 'the reacting actor'}`;
+      }
+    }
+    return offer;
+  });
 }
 
 export interface RollSummary {
@@ -97,6 +282,8 @@ export interface ParsedChatMessage {
   item: { uuid: string | null; id: string | null; name: string | null } | null;
   rolls?: RollSummary[];
   nimble?: {
+    /** Interactive offers on the card (Interpose, force reroll, pool spends). */
+    reactions: ReactionOffer[];
     isCritical: boolean;
     isMiss: boolean;
     advantage: number;
@@ -323,6 +510,7 @@ export function parseChatMessage(
     const allEffects = summarizeEffects(system.activation?.effects, isCritical, isMiss);
     const effects = includeRolls ? allEffects : allEffects.map(({ roll: _roll, ...rest }) => rest);
     parsed.nimble = {
+      reactions: parseIncomingReactions(system.incomingReactions, resolvers),
       isCritical,
       isMiss,
       advantage: Number(system.rollMode ?? 0),

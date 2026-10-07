@@ -27,7 +27,7 @@ import { parseChatMessage, selectChatMessages, type ParsedChatMessage } from './
 const NIMBLE = 'nimble';
 
 /** fromUuidSync is missing from the bundled (v9) type definitions. */
-function fromUuidSyncSafe(uuid: string): any {
+export function fromUuidSyncSafe(uuid: string): any {
   try {
     return (globalThis as any).fromUuidSync?.(uuid) ?? null;
   } catch {
@@ -36,7 +36,7 @@ function fromUuidSyncSafe(uuid: string): any {
 }
 
 /** Array.from for Foundry collections, typed loosely like the rest of the bridge. */
-function toList(value: unknown): any[] {
+export function toList(value: unknown): any[] {
   return Array.from((value ?? []) as Iterable<any>);
 }
 
@@ -44,7 +44,7 @@ function isNimble(): boolean {
   return (game.system as any)?.id === NIMBLE;
 }
 
-function requireNimble(tool: string): void {
+export function requireNimble(tool: string): void {
   if (!isNimble()) {
     throw new Error(`${tool} requires the Nimble system (active: ${(game.system as any)?.id})`);
   }
@@ -65,6 +65,23 @@ export function chatResolvers() {
     },
     itemName: (uuid: string) => fromUuidSyncSafe(uuid)?.name ?? null,
     userName: (id: string) => (game as any).users?.get(id)?.name ?? null,
+    uuidName: (uuid: string) => fromUuidSyncSafe(uuid)?.name ?? null,
+    actorOwners: (actorUuid: string) => {
+      const actor = fromUuidSyncSafe(actorUuid);
+      const owner = (globalThis as any).CONST?.DOCUMENT_OWNERSHIP_LEVELS?.OWNER ?? 3;
+      return toList((game as any).users ?? [])
+        .filter(u => !u.isGM && actor?.ownership?.[u.id] === owner)
+        .map(u => u.name);
+    },
+    reactionRule: (itemUuid: string, ruleId: string) => {
+      const item = fromUuidSyncSafe(itemUuid);
+      const rule = item?.rules
+        ? toList(item.rules.values?.() ?? item.rules).find(r => r.id === ruleId)
+        : null;
+      return rule
+        ? { modifier: rule.modifier, range: rule.range, disabled: rule.disabled === true }
+        : null;
+    },
   };
 }
 
@@ -132,7 +149,7 @@ export function actorStateSnapshot(actor: any): Record<string, any> {
 }
 
 /** Let Nimble's follow-up hooks (dying, wounds, bloodied) settle before reading state. */
-function settle(ms = 300): Promise<void> {
+export function settle(ms = 300): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 

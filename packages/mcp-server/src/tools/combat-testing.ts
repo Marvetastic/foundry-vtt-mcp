@@ -118,7 +118,9 @@ export class CombatTestingTools {
           '(actor and token), flavor, plain-text content, whisper/blind flags, the source item, and rolls ' +
           '(formula, total, every die). Nimble activation cards also get crit/miss, advantage, targets, each ' +
           'effect (damage/healing amount and type, conditions, saves; "applies" says whether it fires for the ' +
-          'rolled outcome) and any healing already applied from the card. Nimble does not record damage ' +
+          'rolled outcome), any healing already applied from the card, and `reactions`: the offers on the card ' +
+          '(Interpose, force reroll, add-damage dice spends) with index, label, who can take each, why ' +
+          '(range, source rule/item) and whether it is used; take one with use-reaction. Nimble does not record damage ' +
           "application on the card; use apply-to-token's before/after instead. Use latestMessageId from one " +
           'call as sinceMessageId in the next to read only new messages.',
         inputSchema: {

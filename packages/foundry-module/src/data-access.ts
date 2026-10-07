@@ -9,6 +9,9 @@ import {
   type LevelUpClassInput,
 } from './nimble-level-up.js';
 import { applyToToken, manageCombat, nimbleAutoRollItem, readChatLog } from './combat-tools.js';
+import { describeNimbleRules } from './nimble-rules.js';
+import { getActorResources, restActor } from './nimble-resources.js';
+import { useReaction, type UseReactionParams } from './nimble-reactions.js';
 // Local type definitions to avoid shared package import issues
 interface CharacterInfo {
   id: string;
@@ -5071,6 +5074,53 @@ export class FoundryDataAccess {
     } catch (error) {
       this.auditLog(
         'applyToToken',
+        params,
+        'failure',
+        error instanceof Error ? error.message : 'Unknown error'
+      );
+      throw error;
+    }
+  }
+
+  async describeNimbleRules(params: {
+    type?: string;
+    validate?: Record<string, unknown>;
+  }): Promise<any> {
+    this.validateFoundryState();
+    return describeNimbleRules(params);
+  }
+
+  async getActorResources(params: { actor: string }): Promise<any> {
+    this.validateFoundryState();
+    return getActorResources(params);
+  }
+
+  async useReaction(params: UseReactionParams): Promise<any> {
+    this.validateFoundryState();
+    try {
+      const result = await useReaction(params);
+      this.auditLog('useReaction', { messageId: params.messageId, offer: params.offer }, 'success');
+      return result;
+    } catch (error) {
+      this.auditLog(
+        'useReaction',
+        { messageId: params.messageId, offer: params.offer },
+        'failure',
+        error instanceof Error ? error.message : 'Unknown error'
+      );
+      throw error;
+    }
+  }
+
+  async restActor(params: { actor: string; restType: 'safe' | 'field' }): Promise<any> {
+    this.validateFoundryState();
+    try {
+      const result = await restActor(params);
+      this.auditLog('restActor', params, 'success');
+      return result;
+    } catch (error) {
+      this.auditLog(
+        'restActor',
         params,
         'failure',
         error instanceof Error ? error.message : 'Unknown error'

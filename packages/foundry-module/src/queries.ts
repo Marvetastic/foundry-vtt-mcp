@@ -136,6 +136,11 @@ export class QueryHandlers {
     CONFIG.queries[`${modulePrefix}.readChatLog`] = this.handleReadChatLog.bind(this);
     CONFIG.queries[`${modulePrefix}.manageCombat`] = this.handleManageCombat.bind(this);
     CONFIG.queries[`${modulePrefix}.applyToToken`] = this.handleApplyToToken.bind(this);
+    CONFIG.queries[`${modulePrefix}.describeNimbleRules`] =
+      this.handleDescribeNimbleRules.bind(this);
+    CONFIG.queries[`${modulePrefix}.getActorResources`] = this.handleGetActorResources.bind(this);
+    CONFIG.queries[`${modulePrefix}.useReaction`] = this.handleUseReaction.bind(this);
+    CONFIG.queries[`${modulePrefix}.restActor`] = this.handleRestActor.bind(this);
     CONFIG.queries[`${modulePrefix}.buildNimbleCharacter`] =
       this.handleBuildNimbleCharacter.bind(this);
     CONFIG.queries[`${modulePrefix}.getSystemSchema`] = this.handleGetSystemSchema.bind(this);
@@ -2026,6 +2031,84 @@ export class QueryHandlers {
     } catch (error) {
       throw new Error(
         `Failed to apply to token: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  private async handleDescribeNimbleRules(data: Record<string, any>): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      return await this.dataAccess.describeNimbleRules({
+        ...(data?.type ? { type: data.type } : {}),
+        ...(data?.validate ? { validate: data.validate } : {}),
+      });
+    } catch (error) {
+      throw new Error(
+        `Failed to describe Nimble rules: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  private async handleGetActorResources(data: Record<string, any>): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      if (!data?.actor) throw new Error('actor is required');
+      return await this.dataAccess.getActorResources({ actor: data.actor });
+    } catch (error) {
+      throw new Error(
+        `Failed to get actor resources: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  private async handleUseReaction(data: Record<string, any>): Promise<any> {
+    try {
+      // SECURITY: taking a reaction changes targets and spends resources — GM-only
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      if (!data?.messageId) throw new Error('messageId is required');
+      if (data.offer === undefined) throw new Error('offer is required');
+      return await this.dataAccess.useReaction({
+        messageId: data.messageId,
+        offer: data.offer,
+        ...(data.actor ? { actor: data.actor } : {}),
+        ...(data.force !== undefined ? { force: data.force } : {}),
+        ...(data.spend ? { spend: data.spend } : {}),
+      });
+    } catch (error) {
+      throw new Error(
+        `Failed to use reaction: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  private async handleRestActor(data: Record<string, any>): Promise<any> {
+    try {
+      // SECURITY: resting restores HP and resources — GM-only
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      if (!data?.actor) throw new Error('actor is required');
+      if (data.restType !== 'safe' && data.restType !== 'field') {
+        throw new Error('restType must be "safe" or "field"');
+      }
+      return await this.dataAccess.restActor({ actor: data.actor, restType: data.restType });
+    } catch (error) {
+      throw new Error(
+        `Failed to rest actor: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
     }
   }

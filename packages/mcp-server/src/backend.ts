@@ -32,6 +32,7 @@ import { JournalManagementTools } from './tools/journal-management.js';
 import { NimbleLevelUpGrantsTools } from './tools/nimble/level-up-grants.js';
 import { NimbleCharacterBuilderTools } from './tools/nimble/character-builder.js';
 import { CombatTestingTools } from './tools/combat-testing.js';
+import { NimbleRulesResourcesTools } from './tools/nimble/rules-resources.js';
 
 import { DiceRollTools } from './tools/dice-roll.js';
 
@@ -1219,6 +1220,7 @@ async function startBackend(): Promise<void> {
   const nimbleLevelUpGrantsTools = new NimbleLevelUpGrantsTools({ foundryClient, logger });
   const nimbleCharacterBuilderTools = new NimbleCharacterBuilderTools({ foundryClient, logger });
   const combatTestingTools = new CombatTestingTools({ foundryClient, logger });
+  const nimbleRulesResourcesTools = new NimbleRulesResourcesTools({ foundryClient, logger });
 
   const diceRollTools = new DiceRollTools({ foundryClient, logger });
 
@@ -1451,6 +1453,8 @@ async function startBackend(): Promise<void> {
     ...nimbleCharacterBuilderTools.getToolDefinitions(),
 
     ...combatTestingTools.getToolDefinitions(),
+
+    ...nimbleRulesResourcesTools.getToolDefinitions(),
 
     ...diceRollTools.getToolDefinitions(),
 
@@ -1725,6 +1729,26 @@ async function startBackend(): Promise<void> {
 
                 case 'apply-to-token':
                   result = await combatTestingTools.handleApplyToToken(args);
+
+                  break;
+
+                case 'describe-nimble-rules':
+                  result = await nimbleRulesResourcesTools.handleDescribeRules(args);
+
+                  break;
+
+                case 'get-actor-resources':
+                  result = await nimbleRulesResourcesTools.handleGetActorResources(args);
+
+                  break;
+
+                case 'use-reaction':
+                  result = await nimbleRulesResourcesTools.handleUseReaction(args);
+
+                  break;
+
+                case 'rest':
+                  result = await nimbleRulesResourcesTools.handleRest(args);
 
                   break;
 
