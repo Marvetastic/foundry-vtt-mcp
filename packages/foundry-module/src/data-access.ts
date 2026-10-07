@@ -8,6 +8,10 @@ import {
   type LevelUpSubclassInput,
   type LevelUpClassInput,
 } from './nimble-level-up.js';
+import { applyToToken, manageCombat, nimbleAutoRollItem, readChatLog } from './combat-tools.js';
+import { describeNimbleRules } from './nimble-rules.js';
+import { getActorResources, restActor } from './nimble-resources.js';
+import { useReaction, type UseReactionParams } from './nimble-reactions.js';
 // Local type definitions to avoid shared package import issues
 interface CharacterInfo {
   id: string;
@@ -4984,7 +4988,27 @@ export class FoundryDataAccess {
       );
     }
 
-    const slug = (value: string) => (value ?? '').slugify({ strict: true });
+    const inputs = await this.gatherNimbleLevelUpInputs(params.classIdentifier);
+    return analyzeNimbleLevelUp(
+      {
+        classIdentifier: params.classIdentifier,
+        ...(params.subclassIdentifier ? { subclassIdentifier: params.subclassIdentifier } : {}),
+        level: params.level,
+        ...inputs,
+      },
+      nimbleSlug
+    );
+  }
+
+  /**
+   * World items plus read-only compendium documents relevant to a class's
+   * level-up: every class and subclass, and the class's features.
+   */
+  private async gatherNimbleLevelUpInputs(classIdentifier: string): Promise<{
+    classes: LevelUpClassInput[];
+    subclasses: LevelUpSubclassInput[];
+    features: LevelUpFeatureInput[];
+  }> {
     const classes: LevelUpClassInput[] = [];
     const subclasses: LevelUpSubclassInput[] = [];
     const features: LevelUpFeatureInput[] = [];
@@ -5044,8 +5068,7 @@ export class FoundryDataAccess {
         } else if (entry.type === 'feature') {
           const sys = entry.system ?? {};
           const relevant =
-            sys.class === params.classIdentifier ||
-            (!sys.class && sys.group === params.classIdentifier);
+            sys.class === classIdentifier || (!sys.class && sys.group === classIdentifier);
           if (!relevant) continue;
           // Full document needed for activation effects and levelUpOptions.
           const doc = await pack.getDocument(entry._id);
@@ -5054,17 +5077,452 @@ export class FoundryDataAccess {
       }
     }
 
-    return analyzeNimbleLevelUp(
-      {
-        classIdentifier: params.classIdentifier,
-        ...(params.subclassIdentifier ? { subclassIdentifier: params.subclassIdentifier } : {}),
-        level: params.level,
-        classes,
-        subclasses,
-        features,
-      },
-      slug
-    );
+    return { classes, subclasses, features };
+  }
+
+  // ===== COMBAT TESTING =====
+
+  async readChatLog(params: {
+    limit?: number;
+    sinceMessageId?: string;
+    sinceTimestamp?: number;
+    speaker?: string;
+    includeRolls?: boolean;
+  }): Promise<any> {
+    this.validateFoundryState();
+    return readChatLog(params);
+  }
+
+  async manageCombat(params: {
+    action: string;
+    combatId?: string;
+    scene?: string;
+    tokens?: string[];
+    combatants?: string[];
+    confirm?: boolean;
+  }): Promise<any> {
+    this.validateFoundryState();
+    try {
+      const result = await manageCombat(params);
+      if (params.action !== 'get') {
+        this.auditLog(
+          'manageCombat',
+          { action: params.action, combatId: params.combatId },
+          'success'
+        );
+      }
+      return result;
+    } catch (error) {
+      this.auditLog(
+        'manageCombat',
+        { action: params.action, combatId: params.combatId },
+        'failure',
+        error instanceof Error ? error.message : 'Unknown error'
+      );
+      throw error;
+    }
+  }
+
+  async applyToToken(params: {
+    tokens?: string[];
+    scene?: string;
+    amount?: number;
+    kind?: 'damage' | 'healing' | 'tempHealing';
+    damageType?: string;
+    fromChatMessageId?: string;
+  }): Promise<any> {
+    this.validateFoundryState();
+    try {
+      const result = await applyToToken(params);
+      this.auditLog('applyToToken', params, 'success');
+      return result;
+    } catch (error) {
+      this.auditLog(
+        'applyToToken',
+        params,
+        'failure',
+        error instanceof Error ? error.message : 'Unknown error'
+      );
+      throw error;
+    }
+  }
+
+  async describeNimbleRules(params: {
+    type?: string;
+    validate?: Record<string, unknown>;
+  }): Promise<any> {
+    this.validateFoundryState();
+    return describeNimbleRules(params);
+  }
+
+  async getActorResources(params: { actor: string }): Promise<any> {
+    this.validateFoundryState();
+    return getActorResources(params);
+  }
+
+  async useReaction(params: UseReactionParams): Promise<any> {
+    this.validateFoundryState();
+    try {
+      const result = await useReaction(params);
+      this.auditLog('useReaction', { messageId: params.messageId, offer: params.offer }, 'success');
+      return result;
+    } catch (error) {
+      this.auditLog(
+        'useReaction',
+        { messageId: params.messageId, offer: params.offer },
+        'failure',
+        error instanceof Error ? error.message : 'Unknown error'
+      );
+      throw error;
+    }
+  }
+
+  async restActor(params: { actor: string; restType: 'safe' | 'field' }): Promise<any> {
+    this.validateFoundryState();
+    try {
+      const result = await restActor(params);
+      this.auditLog('restActor', params, 'success');
+      return result;
+    } catch (error) {
+      this.auditLog(
+        'restActor',
+        params,
+        'failure',
+        error instanceof Error ? error.message : 'Unknown error'
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Find a Nimble origin item (class, subclass, ancestry, background) by id,
+   * uuid, name or slugified name. World items win over compendium entries.
+   * Compendium documents are only read.
+   */
+  private async findNimbleItemDocument(type: string, identifier: string): Promise<any> {
+    const wanted = identifier.trim();
+    const lower = wanted.toLowerCase();
+    if (wanted.startsWith('Compendium.') || wanted.startsWith('Item.')) {
+      const doc: any = await fromUuid(wanted as any);
+      if (!doc || doc.type !== type) throw new Error(`${type} not found: ${identifier}`);
+      return doc;
+    }
+    const matches = (name: string, id?: string) =>
+      id === wanted || name.toLowerCase() === lower || nimbleSlug(name) === wanted;
+
+    const world = (game as any).items?.find((i: any) => i.type === type && matches(i.name, i.id));
+    if (world) return world;
+
+    for (const pack of (game as any).packs) {
+      if (pack.documentName !== 'Item') continue;
+      const index = await pack.getIndex();
+      const entry = index.find((e: any) => e.type === type && matches(e.name ?? '', e._id));
+      if (entry) return pack.getDocument(entry._id);
+    }
+    throw new Error(`${type} not found in world items or compendiums: ${identifier}`);
+  }
+
+  /**
+   * Build a Nimble test character at a level.
+   *
+   * FALLBACK, not the system's own flow: Nimble's character creation
+   * (CharacterCreationDialog#submitCharacterCreation) and level-up
+   * (NimbleCharacter#triggerLevelUp) only run through their dialogs and the
+   * classes are not exposed. This mirrors their data writes instead:
+   * - origin items are copied in the same way (class _preCreate sets starting
+   *   HP, hit dice and classData.levels);
+   * - each level from 2 applies triggerLevelUp's updates with average HP
+   *   (ceil((hitDie + 1) / 2), the dialog's "take average" option);
+   * - features come from the same lookup as check-level-up-grants and are
+   *   granted with the system's own NimbleCharacter#grantLevelUpFeatures;
+   * - max HP and max mana are then derived by the system's data prep.
+   */
+  async buildNimbleCharacter(params: {
+    name: string;
+    folder?: string;
+    ancestry: string;
+    background: string;
+    className: string;
+    subclass?: string;
+    level: number;
+    abilities?: Record<string, number>;
+    statArray?: string;
+    abilityOrder?: string[];
+    startingEquipment?: boolean;
+  }): Promise<any> {
+    this.validateFoundryState();
+    if ((game.system as any)?.id !== 'nimble') {
+      throw new Error('build-nimble-character requires the Nimble system');
+    }
+    const permissionCheck = permissionManager.checkWritePermission('createActor', { quantity: 1 });
+    if (!permissionCheck.allowed) {
+      throw new Error(`${ERROR_MESSAGES.ACCESS_DENIED}: ${permissionCheck.reason}`);
+    }
+
+    const nimbleConfig = (CONFIG as any).NIMBLE ?? {};
+    const abilityKeys = Object.keys(nimbleConfig.abilityScores ?? {});
+    let abilityScores: Record<string, number> = {};
+    if (params.abilities) {
+      abilityScores = params.abilities;
+    } else if (params.statArray) {
+      const values: number[] | undefined = nimbleConfig.statArrayModifiers?.[params.statArray];
+      if (!values) {
+        throw new Error(
+          `Unknown statArray "${params.statArray}". Valid: ${Object.keys(nimbleConfig.statArrayModifiers ?? {}).join(', ')}`
+        );
+      }
+      const order = params.abilityOrder ?? abilityKeys;
+      order.forEach((key, i) => (abilityScores[key] = values[i] ?? 0));
+    }
+    for (const key of Object.keys(abilityScores)) {
+      if (!abilityKeys.includes(key)) {
+        throw new Error(`Unknown ability "${key}". Valid: ${abilityKeys.join(', ')}`);
+      }
+    }
+
+    const classDoc = await this.findNimbleItemDocument('class', params.className);
+    const ancestryDoc = await this.findNimbleItemDocument('ancestry', params.ancestry);
+    const backgroundDoc = await this.findNimbleItemDocument('background', params.background);
+    const subclassDoc = params.subclass
+      ? await this.findNimbleItemDocument('subclass', params.subclass)
+      : null;
+    const classIdentifier = classDoc.identifier ?? nimbleSlug(classDoc.name);
+    if (subclassDoc && subclassDoc.system?.parentClass !== classIdentifier) {
+      throw new Error(
+        `Subclass "${subclassDoc.name}" has parentClass "${subclassDoc.system?.parentClass}", not "${classIdentifier}"`
+      );
+    }
+    if (subclassDoc && params.level < 3) {
+      throw new Error('Subclasses are chosen at level 3; raise level or omit subclass');
+    }
+
+    const startingEquipment = params.startingEquipment ?? true;
+    const sourceOf = (doc: any) => {
+      const source = doc.toObject();
+      source._stats = { ...(source._stats ?? {}), compendiumSource: doc.uuid };
+      if (!startingEquipment) {
+        for (const rule of source.system?.rules ?? []) {
+          if (rule.type === 'grantItem') rule.disabled = true;
+        }
+      }
+      return source;
+    };
+
+    const folderId = await this.getOrCreateFolder(params.folder || 'AI Test', 'Actor');
+    const actor: any = await Actor.create({
+      name: params.name,
+      type: 'character',
+      folder: folderId,
+    } as any);
+    if (!actor) throw new Error('Failed to create actor');
+
+    try {
+      await actor.createEmbeddedDocuments('Item', [
+        sourceOf(backgroundDoc),
+        sourceOf(classDoc),
+        sourceOf(ancestryDoc),
+      ]);
+      if (startingEquipment) {
+        for (const item of actor.items.filter((i: any) => i.type === 'object')) {
+          await item.toggleEquipment?.();
+        }
+      }
+      if (Object.keys(abilityScores).length > 0) {
+        const update: Record<string, number> = {};
+        for (const [key, value] of Object.entries(abilityScores)) {
+          update[`system.abilities.${key}.baseValue`] = value;
+        }
+        await actor.update(update);
+      }
+
+      const inputs = await this.gatherNimbleLevelUpInputs(classIdentifier);
+      const subclassKey = subclassDoc ? nimbleSlug(subclassDoc.name) : undefined;
+      const grantsByLevel: Array<Record<string, any>> = [];
+      const skipped: string[] = [];
+
+      const ownedSources = (): Set<string> => {
+        const owned = new Set<string>();
+        for (const item of actor.items) {
+          if (item.uuid) owned.add(item.uuid);
+          const src = item._stats?.compendiumSource;
+          if (src) owned.add(src);
+        }
+        return owned;
+      };
+
+      const grantForLevel = async (level: number): Promise<Record<string, any>> => {
+        const analysis = analyzeNimbleLevelUp(
+          {
+            classIdentifier,
+            ...(subclassKey && level >= 3 ? { subclassIdentifier: subclassKey } : {}),
+            level,
+            ...inputs,
+          },
+          nimbleSlug
+        );
+        const owned = ownedSources();
+        const notOwned = (ref: { uuid: string }) => !owned.has(ref.uuid);
+
+        // The dialog offers duplicate copies (world + compendium) as a
+        // keep-one choice and recommends the world copy; take that one.
+        const byName = new Map<string, Array<{ uuid: string; name: string; source: string }>>();
+        // Without a subclass the analysis lists every subclass's features;
+        // only the chosen subclass's belong on the character.
+        const subclassRefs =
+          subclassKey && level >= 3
+            ? analysis.subclassFeatures
+                .filter(s => s.groupKey === subclassKey)
+                .flatMap(s => s.features)
+            : [];
+        const autoRefs = [...analysis.classFeatures.autoGrant, ...subclassRefs].filter(notOwned);
+        for (const ref of autoRefs) {
+          const key = ref.name.trim().toLowerCase();
+          byName.set(key, [...(byName.get(key) ?? []), ref]);
+        }
+        const autoGrant = [...byName.values()].map(
+          copies => (copies.find(c => c.source === 'world') ?? copies[0]).uuid
+        );
+
+        const selected = new Map<string, any[]>();
+        const autoPicked: Array<Record<string, any>> = [];
+        for (const group of analysis.classFeatures.selectionGroups) {
+          const candidates = group.features.filter(notOwned);
+          const picks = candidates.slice(0, group.selectionCount);
+          if (picks.length === 0) continue;
+          const docs = (await Promise.all(picks.map(p => fromUuid(p.uuid as any)))).filter(Boolean);
+          selected.set(group.group, docs);
+          autoPicked.push({
+            group: group.group,
+            picked: picks.map(p => p.name),
+            options: candidates.map(c => c.name),
+          });
+        }
+        if (analysis.classFeatures.optionFeatures.length > 0) {
+          skipped.push(
+            `Level ${level}: option features not applied (${analysis.classFeatures.optionFeatures.map(f => f.name).join(', ')})`
+          );
+        }
+
+        const grantedIds: string[] =
+          (await actor.grantLevelUpFeatures({ autoGrant, selected, grantedOptionItems: [] })) ?? [];
+        return {
+          granted: grantedIds.map(id => actor.items.get(id)?.name ?? id),
+          grantedIds,
+          autoPicked,
+          errors: analysis.warnings.filter(w => w.severity === 'error').map(w => w.message),
+        };
+      };
+
+      grantsByLevel.push({ level: 1, ...(await grantForLevel(1)) });
+
+      const dieSizes = [4, 6, 8, 10, 12, 20];
+      for (let level = 2; level <= params.level; level++) {
+        const characterClass: any = Object.values(actor.classes ?? {})[0];
+        if (!characterClass) throw new Error('Class item was not created on the actor');
+
+        const size = characterClass.system.hitDieSize;
+        const bonus = actor.system.attributes?.hitDiceSizeBonus ?? 0;
+        const sizeIndex = dieSizes.indexOf(size);
+        const effectiveSize =
+          sizeIndex >= 0
+            ? dieSizes[Math.min(dieSizes.length - 1, Math.max(0, sizeIndex + bonus))]
+            : size;
+        const hp = Math.ceil((effectiveSize + 1) / 2);
+
+        const hitDice = actor.system.attributes.hitDice?.[String(size)] ?? {
+          current: 0,
+          origin: [],
+        };
+        await actor.updateEmbeddedDocuments('Item', [
+          {
+            _id: characterClass.id,
+            'system.classLevel': level,
+            'system.hpData': [...characterClass.system.hpData, hp],
+          },
+        ]);
+
+        if (level === 3 && subclassDoc) {
+          await actor.createEmbeddedDocuments('Item', [sourceOf(subclassDoc)]);
+        }
+        const grants = await grantForLevel(level);
+
+        await actor.update({
+          'system.attributes.hp.value': actor.system.attributes.hp.value + hp,
+          [`system.attributes.hitDice.${size}`]: {
+            origin: [...(hitDice.origin ?? []), characterClass.identifier],
+            current: (hitDice.current ?? 0) + 1,
+          },
+          'system.classData.levels': [...actor.system.classData.levels, characterClass.identifier],
+          'system.levelUpHistory': [
+            ...(actor.system.levelUpHistory ?? []),
+            {
+              level,
+              hpIncrease: hp,
+              abilityIncreases: null,
+              skillIncreases: {},
+              hitDieAdded: true,
+              classIdentifier: characterClass.identifier,
+              grantedFeatureIds: grants.grantedIds,
+              grantedSpellIds: [],
+              poolMaxBonuses: {},
+            },
+          ],
+        });
+        grantsByLevel.push({ level, hpIncrease: hp, ...grants });
+      }
+
+      // Start at full HP and mana, as derived by the system's data prep.
+      const hpMax = actor.system.attributes.hp.max;
+      const manaMax = actor.system.resources?.mana?.max ?? 0;
+      await actor.update({
+        'system.attributes.hp.value': hpMax,
+        ...(manaMax > 0 ? { 'system.resources.mana.current': manaMax } : {}),
+      });
+
+      this.auditLog('buildNimbleCharacter', { name: params.name, level: params.level }, 'success');
+
+      return {
+        mode: 'fallback',
+        fallbackReason:
+          "Nimble's character creation and level-up only run through dialogs that the system does not expose; " +
+          'their data writes are mirrored instead and features are granted with NimbleCharacter#grantLevelUpFeatures.',
+        actor: { id: actor.id, uuid: actor.uuid, name: actor.name, folderId },
+        level: actor.levels?.character ?? params.level,
+        class: classDoc.name,
+        subclass: subclassDoc?.name ?? null,
+        ancestry: ancestryDoc.name,
+        background: backgroundDoc.name,
+        hp: { ...actor.system.attributes.hp },
+        mana: {
+          current: actor.system.resources?.mana?.current ?? 0,
+          max: actor.system.resources?.mana?.max ?? 0,
+        },
+        hitDice: actor.system.attributes.hitDice,
+        abilities: Object.fromEntries(
+          abilityKeys.map(k => [k, actor.system.abilities?.[k]?.baseValue ?? 0])
+        ),
+        items: actor.items.map((i: any) => ({ id: i.id, name: i.name, type: i.type })),
+        grantsByLevel,
+        notApplied: [
+          'Spells from class spell-grant rules (add with manage-world-items add-to-actor)',
+          'Ability score increases chosen at level-up',
+          'Skill points and languages',
+          'Saving-throw roll modes the creation dialog sets from class/ancestry',
+          ...(params.level > 1 ? ['HP rolls: every level-up took the average'] : []),
+          ...skipped,
+        ],
+      };
+    } catch (error) {
+      this.auditLog(
+        'buildNimbleCharacter',
+        { name: params.name, actorId: actor.id },
+        'failure',
+        error instanceof Error ? error.message : 'Unknown error'
+      );
+      throw new Error(
+        `Building "${params.name}" failed (partial actor ${actor.id} left in place for inspection): ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
   }
 
   /**
@@ -8913,6 +9371,48 @@ export class FoundryDataAccess {
         throw new Error(`Token ${data.tokenId} has no associated actor`);
       }
 
+      // Nimble registers its conditions as core status effects (fixed `_id`s,
+      // i18n-key names, ActiveEffect type "condition"), so toggle them with the
+      // core API Nimble itself uses rather than a hand-built effect.
+      if ((game.system as any)?.id === 'nimble' && typeof actor.toggleStatusEffect === 'function') {
+        const wanted = data.conditionId.toLowerCase();
+        const statusEffects: any[] = (CONFIG as any).statusEffects || [];
+        const nimbleCondition = statusEffects.find(
+          (c: any) =>
+            c.id?.toLowerCase() === wanted ||
+            game.i18n.localize(c.name ?? '').toLowerCase() === wanted
+        );
+        if (!nimbleCondition) {
+          throw new Error(
+            `Condition not found: ${data.conditionId}. Valid ids: ${statusEffects.map((c: any) => c.id).join(', ')}`
+          );
+        }
+        await actor.toggleStatusEffect(nimbleCondition.id, { active: data.active });
+        this.auditLog('toggleTokenCondition', data, 'success');
+        const conditionName = game.i18n.localize(nimbleCondition.name ?? nimbleCondition.id);
+        const automatic = ['bloodied', 'dying', 'wounded', 'dead', 'lastStand'].includes(
+          nimbleCondition.id
+        );
+        return {
+          success: true,
+          tokenId: token.id,
+          tokenName: token.name,
+          conditionId: nimbleCondition.id,
+          conditionName,
+          isActive: data.active,
+          active: data.active,
+          conditions: Array.from(actor.statuses ?? []).sort(),
+          message: data.active
+            ? `Applied ${conditionName} to ${token.name}`
+            : `Removed ${conditionName} from ${token.name}`,
+          ...(automatic
+            ? {
+                note: `Nimble may set or clear "${nimbleCondition.id}" automatically from HP/wounds; a manual toggle can be overridden on the next HP change.`,
+              }
+            : {}),
+        };
+      }
+
       // Get the condition configuration for the game system
       const conditions = (CONFIG as any).statusEffects || [];
       const condition = conditions.find(
@@ -9017,7 +9517,7 @@ export class FoundryDataAccess {
         gameSystem: game.system?.id,
         conditions: conditions.map((condition: any) => ({
           id: condition.id,
-          name: condition.name || condition.label || condition.id,
+          name: game.i18n.localize(condition.name || condition.label || condition.id),
           icon: condition.icon || condition.img,
           description: condition.description || '',
         })),
@@ -9207,6 +9707,9 @@ export class FoundryDataAccess {
           skipDialog?: boolean | undefined; // Skip confirmation dialogs (default: true for MCP)
           spellLevel?: number | undefined; // For spells: cast at higher level
           versatile?: boolean | undefined; // For versatile weapons: use versatile damage
+          autoRoll?: boolean | undefined; // Nimble: roll without the activation dialog
+          advantage?: number | undefined; // Nimble: advantage count, negative = disadvantage
+          rollHidden?: boolean | undefined; // Nimble: GM-only hidden roll
         }
       | undefined;
   }): Promise<{
@@ -9219,6 +9722,7 @@ export class FoundryDataAccess {
     targeting: ItemTargetingResult;
     warnings?: string[];
     requiresGMInteraction?: boolean;
+    [key: string]: unknown;
   }> {
     this.validateFoundryState();
 
@@ -9244,6 +9748,44 @@ export class FoundryDataAccess {
 
     const { targeting, warnings } = await this.applyItemTargets(actor, targets);
     const resolvedTargetNames = targeting.applied.map(target => target.tokenName);
+
+    if (options.autoRoll) {
+      if (systemId !== 'nimble') {
+        throw new Error(`autoRoll is only supported for the Nimble system (active: ${systemId})`);
+      }
+      if (targets && targets.length > 0 && targeting.status !== 'applied') {
+        throw new Error(
+          `Could not set all requested targets (${targeting.status}); not rolling. ${warnings.join(' ')}`
+        );
+      }
+      const result = await nimbleAutoRollItem(actor, item, {
+        ...(options.advantage !== undefined ? { advantage: options.advantage } : {}),
+        ...(options.rollHidden !== undefined ? { rollHidden: options.rollHidden } : {}),
+      });
+      this.auditLog(
+        'useItem',
+        { actorId: actor.id, itemId: item.id, autoRoll: true, messageIds: result.messageIds },
+        'success'
+      );
+      return {
+        success: !result.cancelled,
+        status: result.cancelled ? 'cancelled' : 'completed',
+        message: result.cancelled
+          ? `${item.name} was not used (a Nimble hook or rule cancelled it).`
+          : `${actor.name} used ${item.name}${resolvedTargetNames.length ? ` on ${resolvedTargetNames.join(', ')}` : ''}.`,
+        itemName: item.name,
+        actorName: actor.name,
+        targeting,
+        ...(resolvedTargetNames.length > 0 ? { targets: resolvedTargetNames } : {}),
+        ...(warnings.length > 0 ? { warnings } : {}),
+        messageIds: result.messageIds,
+        rollTotals: result.messages.flatMap(m => (m.rolls ?? []).map(r => r.total)),
+        effects: result.messages.flatMap(m => m.nimble?.effects ?? []),
+        chatMessages: result.messages,
+        actionsBefore: result.actionsBefore,
+        requiresGMInteraction: false,
+      };
+    }
 
     try {
       // For items that may show dialogs (spells with choices, etc.),
@@ -11885,6 +12427,11 @@ export class FoundryDataAccess {
   }
 
   // ─── mgt2e ──────────────────────────────────────────────────────────────────
+}
+
+/** Foundry's String#slugify({ strict: true }), the identifier rule Nimble uses. */
+function nimbleSlug(value: string): string {
+  return (value ?? '').slugify({ strict: true });
 }
 
 // =============================================================================

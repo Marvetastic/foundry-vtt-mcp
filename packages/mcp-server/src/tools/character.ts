@@ -111,7 +111,11 @@ export class CharacterTools {
       {
         name: 'use-item',
         description:
-          'Use an item on a character (cast spell, use ability, activate feature, consume item). Opens the item dialog in Foundry VTT for the GM to configure options and confirm. Optionally specify targets by name. Returns immediately with status "initiated" - tell the user to check Foundry for any dialogs. Works across systems: D&D 5e, PF2e, DSA5. Use get-character or search-character-items first to see available items/spells.',
+          'Use an item on a character (cast spell, use ability, activate feature, consume item). Opens the item dialog in Foundry VTT for the GM to configure options and confirm. Optionally specify targets by name. Returns immediately with status "initiated" - tell the user to check Foundry for any dialogs. Works across systems: D&D 5e, PF2e, DSA5. Use get-character or search-character-items first to see available items/spells.\n' +
+          'Nimble: pass autoRoll:true to roll immediately with no dialog (optionally advantage, rollHidden). ' +
+          'Targets are set before activation; the call then returns the created chat message ids, roll totals ' +
+          'and per-effect results (damage/healing amount and type, crit/miss, targets). In combat the action ' +
+          'cost is still spent even if the actor is out of actions. Apply the result with apply-to-token.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -136,6 +140,23 @@ export class CharacterTools {
             spellLevel: {
               type: 'number',
               description: 'For spells: cast at a higher level than base (D&D 5e upcasting)',
+            },
+            autoRoll: {
+              type: 'boolean',
+              description:
+                'Nimble only: skip the activation dialog and roll with default options, then return the results.',
+            },
+            advantage: {
+              type: 'integer',
+              minimum: -6,
+              maximum: 6,
+              description:
+                'Nimble autoRoll: advantage dice (Nimble rollMode); negative for disadvantage. Default 0.',
+            },
+            rollHidden: {
+              type: 'boolean',
+              description:
+                'Nimble autoRoll: hide the roll from players (GM rolling for non-PCs only).',
             },
           },
           required: ['actorIdentifier', 'itemIdentifier'],
@@ -455,10 +476,25 @@ export class CharacterTools {
       consume: z.boolean().optional(),
       spellLevel: z.number().optional(),
       skipDialog: z.boolean().optional(),
+      autoRoll: z.boolean().optional(),
+      advantage: z.number().int().min(-6).max(6).optional(),
+      rollHidden: z.boolean().optional(),
     });
 
-    const { actorIdentifier, itemIdentifier, targets, consume, spellLevel, skipDialog } =
-      schema.parse(args);
+    const {
+      actorIdentifier,
+      itemIdentifier,
+      targets,
+      consume,
+      spellLevel,
+      skipDialog,
+      autoRoll,
+      advantage,
+      rollHidden,
+    } = schema.parse(args);
+    if (!autoRoll && (advantage !== undefined || rollHidden !== undefined)) {
+      throw new Error('advantage and rollHidden only apply with autoRoll: true');
+    }
 
     this.logger.info('Using item', {
       actorIdentifier,
@@ -478,6 +514,9 @@ export class CharacterTools {
           consume: consume ?? true,
           spellLevel,
           skipDialog: skipDialog ?? true, // Default to skipping dialogs for MCP automation
+          ...(autoRoll ? { autoRoll: true } : {}),
+          ...(advantage !== undefined ? { advantage } : {}),
+          ...(rollHidden !== undefined ? { rollHidden } : {}),
         },
       });
 
