@@ -128,6 +128,11 @@ export class QueryHandlers {
     CONFIG.queries[`${modulePrefix}.createWorldItems`] = this.handleCreateWorldItems.bind(this);
     CONFIG.queries[`${modulePrefix}.listWorldItems`] = this.handleListWorldItems.bind(this);
     CONFIG.queries[`${modulePrefix}.updateWorldItems`] = this.handleUpdateWorldItems.bind(this);
+    CONFIG.queries[`${modulePrefix}.getWorldItems`] = this.handleGetWorldItems.bind(this);
+    CONFIG.queries[`${modulePrefix}.deleteWorldItems`] = this.handleDeleteWorldItems.bind(this);
+    CONFIG.queries[`${modulePrefix}.manageJournals`] = this.handleManageJournals.bind(this);
+    CONFIG.queries[`${modulePrefix}.checkNimbleLevelUpGrants`] =
+      this.handleCheckNimbleLevelUpGrants.bind(this);
     CONFIG.queries[`${modulePrefix}.getSystemSchema`] = this.handleGetSystemSchema.bind(this);
 
     // Generic actor CRUD (any system, any type)
@@ -1825,6 +1830,130 @@ export class QueryHandlers {
     } catch (error) {
       throw new Error(
         `Failed to create world items: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  private async handleGetWorldItems(data: { itemIds: string[] }): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+      return await this.dataAccess.getWorldItems({ itemIds: data?.itemIds });
+    } catch (error) {
+      throw new Error(
+        `Failed to get world items: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  private async handleDeleteWorldItems(data: {
+    itemIds: string[];
+    confirm?: boolean;
+  }): Promise<any> {
+    try {
+      // SECURITY: World item deletion is GM-only and never touches compendiums
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+      return await this.dataAccess.deleteWorldItems({
+        itemIds: data?.itemIds,
+        ...(data?.confirm !== undefined ? { confirm: data.confirm } : {}),
+      });
+    } catch (error) {
+      throw new Error(
+        `Failed to delete world items: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  private async handleManageJournals(data: Record<string, any>): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+
+      switch (data?.action) {
+        case 'create':
+          return await this.dataAccess.createJournal({
+            name: data.name,
+            pages: data.pages ?? [],
+            ...(data.folder !== undefined ? { folder: data.folder } : {}),
+            ...(data.visibility !== undefined ? { visibility: data.visibility } : {}),
+          });
+        case 'get':
+          return await this.dataAccess.getJournalFull(data.entry);
+        case 'update-page':
+          return await this.dataAccess.updateJournalPage({
+            entry: data.entry,
+            pageId: data.pageId,
+            ...(data.html !== undefined ? { html: data.html } : {}),
+            ...(data.name !== undefined ? { name: data.name } : {}),
+          });
+        case 'append':
+          return await this.dataAccess.appendJournalPage({
+            entry: data.entry,
+            pageId: data.pageId,
+            html: data.html,
+          });
+        case 'add-page':
+          return await this.dataAccess.addJournalPage({
+            entry: data.entry,
+            name: data.name,
+            html: data.html,
+          });
+        case 'delete':
+          return await this.dataAccess.deleteJournals({
+            entryIds: data.entryIds,
+            ...(data.confirm !== undefined ? { confirm: data.confirm } : {}),
+          });
+        case 'list-folders':
+          return await this.dataAccess.listJournalFolders();
+        default:
+          throw new Error(`Unknown action: ${String(data?.action)}`);
+      }
+    } catch (error) {
+      throw new Error(
+        `Failed to manage journals: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  private async handleCheckNimbleLevelUpGrants(data: {
+    classIdentifier: string;
+    subclassIdentifier?: string;
+    level: number;
+  }): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+
+      if (!data?.classIdentifier) throw new Error('classIdentifier is required');
+      if (!Number.isInteger(data.level) || data.level < 1) {
+        throw new Error('level must be a positive integer');
+      }
+
+      return await this.dataAccess.checkNimbleLevelUpGrants({
+        classIdentifier: data.classIdentifier,
+        level: data.level,
+        ...(data.subclassIdentifier ? { subclassIdentifier: data.subclassIdentifier } : {}),
+      });
+    } catch (error) {
+      throw new Error(
+        `Failed to check level-up grants: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
     }
   }

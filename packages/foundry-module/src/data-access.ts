@@ -1,6 +1,13 @@
 import { MODULE_ID, ERROR_MESSAGES, TOKEN_DISPOSITIONS } from './constants.js';
 import { permissionManager } from './permissions.js';
 import { transactionManager } from './transaction-manager.js';
+import {
+  analyzeNimbleLevelUp,
+  type LevelUpAnalysis,
+  type LevelUpFeatureInput,
+  type LevelUpSubclassInput,
+  type LevelUpClassInput,
+} from './nimble-level-up.js';
 // Local type definitions to avoid shared package import issues
 interface CharacterInfo {
   id: string;
@@ -4644,6 +4651,358 @@ export class FoundryDataAccess {
   }
 
   /**
+   * Resolve a world JournalEntry by id, "JournalEntry.<id>" UUID, or exact name.
+   * Compendium references are refused.
+   */
+  private resolveWorldJournal(identifier: string): any {
+    if (typeof identifier !== 'string' || identifier.trim().length === 0) {
+      throw new Error('Journal entry identifier is required');
+    }
+    const trimmed = identifier.trim();
+    if (!trimmed.startsWith('Compendium.') && !trimmed.includes('.')) {
+      const byId = game.journal.get(trimmed);
+      if (byId) return byId;
+    }
+    if (trimmed.startsWith('Compendium.') || trimmed.startsWith('JournalEntry.')) {
+      const [id] = resolveWorldDocumentIds([trimmed], 'JournalEntry');
+      const byUuid = game.journal.get(id);
+      if (!byUuid) throw new Error(`Journal entry not found: ${trimmed}`);
+      return byUuid;
+    }
+    const byName = game.journal.filter((j: any) => j.name === trimmed);
+    if (byName.length > 1) {
+      throw new Error(
+        `${byName.length} journal entries are named "${trimmed}"; pass an id instead (${byName.map((j: any) => j.id).join(', ')})`
+      );
+    }
+    if (byName.length === 0) throw new Error(`Journal entry not found: ${trimmed}`);
+    return byName[0];
+  }
+
+  /**
+   * Create a journal entry with arbitrary pages, an optional folder (name or
+   * id, created if absent) and GM-only or player-visible ownership.
+   */
+  async createJournal(request: {
+    name: string;
+    folder?: string;
+    pages: Array<{ name: string; html: string }>;
+    visibility?: 'gm' | 'players';
+  }): Promise<{
+    id: string;
+    name: string;
+    folderId: string | null;
+    pages: Array<{ id: string; name: string }>;
+  }> {
+    this.validateFoundryState();
+
+    const permissionCheck = permissionManager.checkWritePermission('createActor', { quantity: 1 });
+    if (!permissionCheck.allowed) {
+      throw new Error(`Journal creation denied: ${permissionCheck.reason}`);
+    }
+
+    const visibility = request.visibility ?? 'gm';
+    if (visibility !== 'gm' && visibility !== 'players') {
+      throw new Error(`visibility must be "gm" or "players", got "${String(visibility)}"`);
+    }
+
+    try {
+      let folderId: string | null = null;
+      if (request.folder && request.folder.trim().length > 0) {
+        const folderKey = request.folder.trim();
+        const existing = game.folders?.find(
+          (f: any) => f.type === 'JournalEntry' && (f.id === folderKey || f.name === folderKey)
+        );
+        folderId = existing ? existing.id : await this.getOrCreateFolder(folderKey, 'JournalEntry');
+      }
+
+      // DOCUMENT_OWNERSHIP_LEVELS: NONE = 0, OBSERVER = 2
+      const ownership = { default: visibility === 'players' ? 2 : 0 };
+
+      const journal: any = await JournalEntry.create({
+        name: request.name,
+        folder: folderId,
+        ownership,
+        pages: request.pages.map(p => ({ type: 'text', name: p.name, text: { content: p.html } })),
+      } as any);
+      if (!journal) throw new Error('Failed to create journal entry');
+
+      const result = {
+        id: journal.id,
+        name: journal.name,
+        folderId,
+        pages: journal.pages.contents.map((p: any) => ({ id: p.id, name: p.name })),
+      };
+      this.auditLog('createJournal', { name: request.name, visibility }, 'success');
+      return result;
+    } catch (error) {
+      this.auditLog(
+        'createJournal',
+        { name: request.name, visibility },
+        'failure',
+        error instanceof Error ? error.message : 'Unknown error'
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Get a journal entry with every page's full content and ownership.
+   */
+  async getJournalFull(identifier: string): Promise<Record<string, any>> {
+    this.validateFoundryState();
+    const journal = this.resolveWorldJournal(identifier);
+    return {
+      id: journal.id,
+      name: journal.name,
+      folderId: journal.folder?.id ?? null,
+      folderName: journal.folder?.name ?? null,
+      ownership: journal.ownership ?? {},
+      pages: journal.pages.contents.map((page: any) => ({
+        id: page.id,
+        name: page.name,
+        type: page.type,
+        sort: page.sort,
+        ownership: page.ownership ?? {},
+        html: page.type === 'text' ? (page.text?.content ?? '') : undefined,
+        src: page.type === 'text' ? undefined : (page.src ?? null),
+      })),
+    };
+  }
+
+  /**
+   * Replace a page's HTML and/or rename it. Content writes go through
+   * updateJournalContent.
+   */
+  async updateJournalPage(request: {
+    entry: string;
+    pageId: string;
+    html?: string;
+    name?: string;
+  }): Promise<{ success: boolean; pageId?: string | undefined; pageName?: string | undefined }> {
+    const journal = this.resolveWorldJournal(request.entry);
+    const page = journal.pages.get(request.pageId);
+    if (!page) throw new Error(`Page not found: ${request.pageId}`);
+
+    if (request.html !== undefined) {
+      return this.updateJournalContent({
+        journalId: journal.id,
+        pageId: page.id,
+        content: request.html,
+        newPageName: request.name,
+      });
+    }
+    if (request.name === undefined) throw new Error('Provide html and/or name to update');
+
+    const permissionCheck = permissionManager.checkWritePermission('createActor', { quantity: 1 });
+    if (!permissionCheck.allowed) {
+      throw new Error(`Journal update denied: ${permissionCheck.reason}`);
+    }
+    await page.update({ name: request.name });
+    this.auditLog('updateJournalPage', { journalId: journal.id, pageId: page.id }, 'success');
+    return { success: true, pageId: page.id, pageName: request.name };
+  }
+
+  /**
+   * Append HTML to the end of a text page.
+   */
+  async appendJournalPage(request: {
+    entry: string;
+    pageId: string;
+    html: string;
+  }): Promise<{ success: boolean; pageId?: string | undefined; pageName?: string | undefined }> {
+    const journal = this.resolveWorldJournal(request.entry);
+    const page = journal.pages.get(request.pageId);
+    if (!page) throw new Error(`Page not found: ${request.pageId}`);
+    if (page.type !== 'text') throw new Error(`Page "${page.name}" is not a text page`);
+
+    return this.updateJournalContent({
+      journalId: journal.id,
+      pageId: page.id,
+      content: (page.text?.content ?? '') + request.html,
+    });
+  }
+
+  /**
+   * Add a new text page to an existing entry.
+   */
+  async addJournalPage(request: {
+    entry: string;
+    name: string;
+    html: string;
+  }): Promise<{ success: boolean; pageId?: string | undefined; pageName?: string | undefined }> {
+    const journal = this.resolveWorldJournal(request.entry);
+    return this.updateJournalContent({
+      journalId: journal.id,
+      content: request.html,
+      newPageName: request.name,
+    });
+  }
+
+  /**
+   * Delete world journal entries by id. Requires confirm === true; compendium
+   * references are refused.
+   */
+  async deleteJournals(params: { entryIds: string[]; confirm?: boolean }): Promise<{
+    deleted: Array<{ id: string; name: string }>;
+    notFound: string[];
+  }> {
+    this.validateFoundryState();
+
+    if (params.confirm !== true) {
+      throw new Error('Refusing to delete: "confirm: true" is required');
+    }
+
+    const ids = resolveWorldDocumentIds(params.entryIds, 'JournalEntry');
+    const targets: Array<{ id: string; name: string }> = [];
+    const notFound: string[] = [];
+    for (const id of ids) {
+      const journal = game.journal.get(id);
+      if (!journal) {
+        notFound.push(id);
+        continue;
+      }
+      if ((journal as any).pack || (journal as any).compendium) {
+        throw new Error(`Refusing to delete "${journal.name}" (${id}): it belongs to a compendium`);
+      }
+      targets.push({ id: journal.id as string, name: journal.name as string });
+    }
+    if (targets.length === 0) {
+      throw new Error('None of the provided journal entry IDs were found in the world');
+    }
+
+    try {
+      await (JournalEntry as any).deleteDocuments(targets.map(t => t.id));
+      this.auditLog('deleteJournals', { ids: targets.map(t => t.id) }, 'success');
+      return { deleted: targets, notFound };
+    } catch (error) {
+      this.auditLog(
+        'deleteJournals',
+        { ids: targets.map(t => t.id) },
+        'failure',
+        error instanceof Error ? error.message : 'Unknown error'
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * List JournalEntry folders with their parent.
+   */
+  async listJournalFolders(): Promise<
+    Array<{ id: string; name: string; parentId: string | null; parentName: string | null }>
+  > {
+    this.validateFoundryState();
+    return (game.folders?.filter((f: any) => f.type === 'JournalEntry') ?? []).map((f: any) => ({
+      id: f.id,
+      name: f.name,
+      parentId: f.folder?.id ?? null,
+      parentName: f.folder?.name ?? null,
+    }));
+  }
+
+  /**
+   * Nimble only, read-only: report which subclasses and features the
+   * level-up dialog would offer/grant. Gathers world items plus compendium
+   * documents the same way the system does, then runs analyzeNimbleLevelUp
+   * (see nimble-level-up.ts for the mirrored system functions).
+   */
+  async checkNimbleLevelUpGrants(params: {
+    classIdentifier: string;
+    subclassIdentifier?: string;
+    level: number;
+  }): Promise<LevelUpAnalysis> {
+    this.validateFoundryState();
+    if ((game.system as any)?.id !== 'nimble') {
+      throw new Error(
+        `check-level-up-grants only supports the Nimble system (active: ${(game.system as any)?.id})`
+      );
+    }
+
+    const slug = (value: string) => (value ?? '').slugify({ strict: true });
+    const classes: LevelUpClassInput[] = [];
+    const subclasses: LevelUpSubclassInput[] = [];
+    const features: LevelUpFeatureInput[] = [];
+
+    const toFeature = (doc: any, source: 'world' | 'compendium', pack: string | null) => ({
+      uuid: doc.uuid,
+      name: doc.name,
+      source,
+      pack,
+      system: doc.system ?? {},
+    });
+
+    for (const item of (game as any).items) {
+      if (item.type === 'class') {
+        classes.push({ uuid: item.uuid, name: item.name, source: 'world' });
+      } else if (item.type === 'subclass') {
+        subclasses.push({
+          uuid: item.uuid,
+          name: item.name,
+          source: 'world',
+          pack: null,
+          parentClass: item.system?.parentClass ?? '',
+          storedIdentifier: item._source?.system?.identifier ?? null,
+        });
+      } else if (item.type === 'feature') {
+        features.push(toFeature(item, 'world', null));
+      }
+    }
+
+    // Read-only pack access: index lookups and getDocument() only.
+    const indexFields = [
+      'system.class',
+      'system.subclass',
+      'system.gainedAtLevel',
+      'system.gainedAtLevels',
+      'system.group',
+      'system.parentClass',
+    ];
+    for (const pack of (game as any).packs) {
+      if (pack.documentName !== 'Item') continue;
+      const index = await pack.getIndex({ fields: indexFields });
+      for (const entry of index) {
+        if (entry.type === 'class') {
+          classes.push({ uuid: entry.uuid, name: entry.name, source: 'compendium' });
+        } else if (entry.type === 'subclass') {
+          // getSubclassChoices loads every subclass document to read parentClass.
+          const doc = await pack.getDocument(entry._id);
+          if (!doc) continue;
+          subclasses.push({
+            uuid: doc.uuid,
+            name: doc.name,
+            source: 'compendium',
+            pack: pack.collection,
+            parentClass: doc.system?.parentClass ?? '',
+            storedIdentifier: doc._source?.system?.identifier ?? null,
+          });
+        } else if (entry.type === 'feature') {
+          const sys = entry.system ?? {};
+          const relevant =
+            sys.class === params.classIdentifier ||
+            (!sys.class && sys.group === params.classIdentifier);
+          if (!relevant) continue;
+          // Full document needed for activation effects and levelUpOptions.
+          const doc = await pack.getDocument(entry._id);
+          if (doc) features.push(toFeature(doc, 'compendium', pack.collection));
+        }
+      }
+    }
+
+    return analyzeNimbleLevelUp(
+      {
+        classIdentifier: params.classIdentifier,
+        ...(params.subclassIdentifier ? { subclassIdentifier: params.subclassIdentifier } : {}),
+        level: params.level,
+        classes,
+        subclasses,
+        features,
+      },
+      slug
+    );
+  }
+
+  /**
    * Create actors from compendium entries with custom names
    */
   async createActorFromCompendium(request: ActorCreationRequest): Promise<ActorCreationResult> {
@@ -5388,6 +5747,92 @@ export class FoundryDataAccess {
       this.auditLog(
         'createWorldItems',
         { folder: folder ?? null, count: payload.length },
+        'failure',
+        error instanceof Error ? error.message : 'Unknown error'
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Read back world-level Items with their full stored system data and effects.
+   * Ids may be plain ids or "Item.<id>" UUIDs; compendium references are refused.
+   */
+  async getWorldItems(params: { itemIds: string[] }): Promise<{
+    items: Array<Record<string, any>>;
+    notFound: string[];
+  }> {
+    this.validateFoundryState();
+
+    const ids = resolveWorldDocumentIds(params.itemIds, 'Item');
+    const items: Array<Record<string, any>> = [];
+    const notFound: string[] = [];
+
+    for (const id of ids) {
+      const item = (game as any).items?.get(id);
+      if (!item) {
+        notFound.push(id);
+        continue;
+      }
+      const source = item.toObject();
+      items.push({
+        id: item.id,
+        uuid: item.uuid,
+        name: item.name,
+        type: item.type,
+        img: item.img ?? null,
+        folderId: item.folder?.id ?? null,
+        folderName: item.folder?.name ?? null,
+        system: source.system ?? {},
+        effects: source.effects ?? [],
+      });
+    }
+
+    return { items, notFound };
+  }
+
+  /**
+   * Delete world-level Items by id. Requires confirm === true. Refuses any
+   * compendium reference and never touches packs.
+   */
+  async deleteWorldItems(params: { itemIds: string[]; confirm?: boolean }): Promise<{
+    deleted: Array<{ id: string; name: string }>;
+    notFound: string[];
+  }> {
+    this.validateFoundryState();
+
+    if (params.confirm !== true) {
+      throw new Error('Refusing to delete: "confirm: true" is required');
+    }
+
+    const ids = resolveWorldDocumentIds(params.itemIds, 'Item');
+    const targets: Array<{ id: string; name: string }> = [];
+    const notFound: string[] = [];
+
+    for (const id of ids) {
+      const item = (game as any).items?.get(id);
+      if (!item) {
+        notFound.push(id);
+        continue;
+      }
+      if (item.pack || item.compendium) {
+        throw new Error(`Refusing to delete "${item.name}" (${id}): it belongs to a compendium`);
+      }
+      targets.push({ id: item.id, name: item.name });
+    }
+
+    if (targets.length === 0) {
+      throw new Error('None of the provided item IDs were found in the world');
+    }
+
+    try {
+      await (Item as any).deleteDocuments(targets.map(t => t.id));
+      this.auditLog('deleteWorldItems', { ids: targets.map(t => t.id) }, 'success');
+      return { deleted: targets, notFound };
+    } catch (error) {
+      this.auditLog(
+        'deleteWorldItems',
+        { ids: targets.map(t => t.id) },
         'failure',
         error instanceof Error ? error.message : 'Unknown error'
       );
@@ -11363,6 +11808,41 @@ export class FoundryDataAccess {
   }
 
   // ─── mgt2e ──────────────────────────────────────────────────────────────────
+}
+
+// =============================================================================
+// World-document id helpers
+// =============================================================================
+
+/**
+ * Normalise ids for world-only operations. Accepts plain ids and
+ * "<DocumentName>.<id>" UUIDs; throws on compendium UUIDs or any other
+ * reference so deletes can never reach a pack.
+ */
+export function resolveWorldDocumentIds(
+  ids: unknown,
+  documentName: 'Item' | 'JournalEntry'
+): string[] {
+  if (!Array.isArray(ids) || ids.length === 0) {
+    throw new Error('At least one id is required');
+  }
+  return ids.map((raw, idx) => {
+    if (typeof raw !== 'string' || raw.trim().length === 0) {
+      throw new Error(`ids[${idx}] must be a non-empty string`);
+    }
+    const id = raw.trim();
+    if (id.startsWith('Compendium.')) {
+      throw new Error(`Refusing "${id}": compendium documents cannot be modified by this tool`);
+    }
+    const prefix = `${documentName}.`;
+    if (id.startsWith(prefix) && !id.slice(prefix.length).includes('.')) {
+      return id.slice(prefix.length);
+    }
+    if (id.includes('.')) {
+      throw new Error(`"${id}" is not a world ${documentName} id`);
+    }
+    return id;
+  });
 }
 
 // =============================================================================

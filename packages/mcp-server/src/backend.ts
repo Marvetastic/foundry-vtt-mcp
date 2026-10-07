@@ -28,6 +28,8 @@ import { ActorManagementTools } from './tools/actor-management.js';
 import { EffectManagementTools } from './tools/effect-management.js';
 
 import { QuestCreationTools } from './tools/quest-creation.js';
+import { JournalManagementTools } from './tools/journal-management.js';
+import { NimbleLevelUpGrantsTools } from './tools/nimble/level-up-grants.js';
 
 import { DiceRollTools } from './tools/dice-roll.js';
 
@@ -1211,6 +1213,8 @@ async function startBackend(): Promise<void> {
   });
 
   const questCreationTools = new QuestCreationTools({ foundryClient, logger });
+  const journalManagementTools = new JournalManagementTools({ foundryClient, logger });
+  const nimbleLevelUpGrantsTools = new NimbleLevelUpGrantsTools({ foundryClient, logger });
 
   const diceRollTools = new DiceRollTools({ foundryClient, logger });
 
@@ -1437,6 +1441,9 @@ async function startBackend(): Promise<void> {
     ...dnd5eFeaturesFromCompendiumTools.getToolDefinitions(),
 
     ...questCreationTools.getToolDefinitions(),
+    ...journalManagementTools.getToolDefinitions(),
+
+    ...nimbleLevelUpGrantsTools.getToolDefinitions(),
 
     ...diceRollTools.getToolDefinitions(),
 
@@ -1677,6 +1684,18 @@ async function startBackend(): Promise<void> {
 
                 case 'search-journals':
                   result = await questCreationTools.handleSearchJournals(args);
+
+                  break;
+
+                case 'manage-journals':
+                  result = await journalManagementTools.handleManageJournals(args);
+
+                  break;
+
+                // Nimble tools
+
+                case 'check-level-up-grants':
+                  result = await nimbleLevelUpGrantsTools.handleCheckLevelUpGrants(args);
 
                   break;
 
