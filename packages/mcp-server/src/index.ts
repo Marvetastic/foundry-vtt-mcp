@@ -24,6 +24,41 @@ const CONTROL_HOST = '127.0.0.1';
 
 const CONTROL_PORT = 31414;
 
+// How long a wrapper keeps trying to reach a backend before giving up. Claude Desktop
+// starts several wrappers at once, so a backend started by another wrapper may still be
+// booting when we first try to connect.
+const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
+
+const MAX_RETRY_DELAY_MS = 1_000;
+
+// Minimum gap between spawn attempts while no backend is reachable.
+const RESPAWN_INTERVAL_MS = 2_000;
+
+// Same path as LOCK_FILE in backend.ts
+const BACKEND_LOCK_FILE = path.join(os.tmpdir(), 'foundry-mcp-backend.lock');
+
+// True when the backend lock names a live process, i.e. a backend is running or still booting
+function isBackendLockHeld(): boolean {
+  try {
+    const pid = parseInt(fs.readFileSync(BACKEND_LOCK_FILE, 'utf8').trim(), 10);
+
+    if (!pid) return false;
+
+    process.kill(pid, 0);
+
+    return true;
+  } catch (e) {
+    // EPERM means the process exists but belongs to someone else
+    return (e as any)?.code === 'EPERM';
+  }
+}
+
+function getConnectTimeoutMs(): number {
+  const raw = Number(process.env.FOUNDRY_MCP_CONNECT_TIMEOUT_MS);
+
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_CONNECT_TIMEOUT_MS;
+}
+
 type BackendReq = { id: string; method: string; params?: any };
 
 type BackendRes = { id: string; result?: any; error?: { message: string } };
@@ -38,6 +73,8 @@ class BackendClient {
   private logFile = path.join(os.tmpdir(), 'foundry-mcp-server', 'wrapper.log');
 
   private backendProcess: ChildProcess | null = null;
+
+  private connecting: Promise<void> | null = null;
 
   private log(msg: string, meta?: any) {
     try {
@@ -54,9 +91,16 @@ class BackendClient {
   async ensure(): Promise<void> {
     if (this.socket && !this.socket.destroyed) return;
 
-    this.log('ensure(): connecting to backend');
+    // Share one connection attempt between concurrent callers
+    if (!this.connecting) {
+      this.log('ensure(): connecting to backend');
 
-    await this.connectWithRetry();
+      this.connecting = this.connectWithRetry().finally(() => {
+        this.connecting = null;
+      });
+    }
+
+    await this.connecting;
   }
 
   private connect(): Promise<void> {
@@ -85,103 +129,128 @@ class BackendClient {
   }
 
   private async connectWithRetry(): Promise<void> {
-    try {
-      await this.connect();
+    const timeoutMs = getConnectTimeoutMs();
 
-      return;
-    } catch (initialError) {
-      this.log('connectWithRetry(): starting backend');
+    const startedAt = Date.now();
 
-      await this.startBackend();
+    const deadline = startedAt + timeoutMs;
 
-      const maxAttempts = 40;
+    let lastSpawnAt = 0;
 
-      let lastError: unknown = initialError;
+    let lastError: unknown;
 
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        const delayMs = Math.min(250 * Math.pow(1.4, attempt), 2000);
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await this.connect();
 
-        await new Promise(resolve => setTimeout(resolve, delayMs));
-
-        try {
-          await this.connect();
-
-          return;
-        } catch (error) {
-          lastError = error;
-
-          this.log('connectWithRetry(): retry failed', {
-            attempt: attempt + 1,
-            delayMs,
-            error: (error as any)?.message,
+        if (attempt > 0) {
+          this.log('connectWithRetry(): connected', {
+            attempts: attempt + 1,
+            elapsedMs: Date.now() - startedAt,
           });
         }
+
+        return;
+      } catch (error) {
+        lastError = error;
       }
 
-      const errorMessage = lastError instanceof Error ? lastError.message : 'Unknown error';
+      // Nothing is listening yet. Start a backend unless ours is still booting or another
+      // backend holds the lock (it is still booting, so keep waiting for it). If we lose the
+      // lock race our backend exits cleanly; if the lock holder dies, a later pass replaces it.
+      if (
+        !this.backendProcess &&
+        Date.now() - lastSpawnAt >= RESPAWN_INTERVAL_MS &&
+        (lastSpawnAt === 0 || !isBackendLockHeld())
+      ) {
+        lastSpawnAt = Date.now();
 
-      throw new Error(
-        `Unable to connect to Foundry MCP backend after ${maxAttempts} attempts: ${errorMessage}`
-      );
+        this.log('connectWithRetry(): starting backend');
+
+        this.startBackend();
+      }
+
+      const remainingMs = deadline - Date.now();
+
+      if (remainingMs <= 0) break;
+
+      const delayMs = Math.min(100 * Math.pow(1.5, attempt), MAX_RETRY_DELAY_MS, remainingMs);
+
+      this.log('connectWithRetry(): retry failed', {
+        attempt: attempt + 1,
+        delayMs: Math.round(delayMs),
+        error: (lastError as any)?.message,
+      });
+
+      await new Promise(resolve => setTimeout(resolve, delayMs));
     }
+
+    const errorMessage = lastError instanceof Error ? lastError.message : 'Unknown error';
+
+    const message =
+      `Foundry MCP wrapper: no backend accepted a connection on ${CONTROL_HOST}:${CONTROL_PORT} ` +
+      `within ${timeoutMs}ms (last error: ${errorMessage}). ` +
+      `Set FOUNDRY_MCP_CONNECT_TIMEOUT_MS to wait longer.`;
+
+    this.log('connectWithRetry(): giving up', { timeoutMs, error: errorMessage });
+
+    console.error(message);
+
+    throw new Error(message);
   }
 
-  private startBackend(): Promise<void> {
-    return new Promise(async resolve => {
-      let backendPath: string | null = null;
+  private startBackend(): void {
+    let backendPath: string;
 
-      try {
-        const backendUrl = new URL('./backend.js', import.meta.url as any);
+    try {
+      const backendUrl = new URL('./backend.js', import.meta.url as any);
 
-        backendPath = fileURLToPath(backendUrl);
-      } catch {
-        const pathMod = await import('path');
+      backendPath = fileURLToPath(backendUrl);
+    } catch {
+      const baseDir =
+        typeof __dirname !== 'undefined'
+          ? __dirname
+          : path.dirname((process.argv && process.argv[1]) || process.cwd());
 
-        const fsMod = await import('fs');
+      // Prefer bundled backend when present (contains deps), fallback to ESM
 
-        const baseDir =
-          typeof __dirname !== 'undefined'
-            ? __dirname
-            : pathMod.dirname((process.argv && process.argv[1]) || process.cwd());
+      const bundleCandidate = path.join(baseDir, 'backend.bundle.cjs');
 
-        // Prefer bundled backend when present (contains deps), fallback to ESM
+      const jsCandidate = path.join(baseDir, 'backend.js');
 
-        const bundleCandidate = pathMod.join(baseDir, 'backend.bundle.cjs');
+      backendPath = fs.existsSync(bundleCandidate) ? bundleCandidate : jsCandidate;
+    }
 
-        const jsCandidate = pathMod.join(baseDir, 'backend.js');
+    const nodePath = process.execPath;
 
-        backendPath = fsMod.existsSync(bundleCandidate) ? bundleCandidate : jsCandidate;
+    const child = spawn(nodePath, [backendPath], {
+      detached: false, // Stay attached to monitor backend
+
+      stdio: ['ignore', 'ignore', 'pipe'], // Capture stderr to detect exit
+    });
+
+    this.log('startBackend(): spawned', { node: nodePath, path: backendPath, pid: child.pid });
+
+    // Store reference for cleanup
+
+    this.backendProcess = child;
+
+    child.on('error', err => {
+      this.log('startBackend(): spawn error', { error: err.message });
+    });
+
+    child.on('exit', code => {
+      if (this.backendProcess === child) this.backendProcess = null;
+
+      if (code === 0) {
+        // The backend exits cleanly when another backend already holds the lock. That
+        // backend may still be booting, so connectWithRetry() keeps waiting for it.
+        this.log('startBackend(): backend exited cleanly (lock held by another backend)', {
+          pid: child.pid,
+        });
+      } else if (code !== null) {
+        this.log('startBackend(): backend exited unexpectedly', { pid: child.pid, exitCode: code });
       }
-
-      this.log('startBackend(): spawning', { path: backendPath });
-
-      const child = spawn(process.execPath, [backendPath!], {
-        detached: false, // Stay attached to monitor backend
-
-        stdio: ['ignore', 'ignore', 'pipe'], // Capture stderr to detect exit
-      });
-
-      // Store reference for cleanup
-
-      this.backendProcess = child;
-
-      // Monitor backend exit - if it exits cleanly (code 0), this wrapper should also exit
-
-      child.on('exit', code => {
-        this.backendProcess = null; // Clear reference when backend exits
-
-        if (code === 0) {
-          this.log('startBackend(): backend exited cleanly (likely lock failure), exiting wrapper');
-
-          process.exit(0); // Exit wrapper when backend fails to acquire lock
-        } else if (code !== null) {
-          this.log('startBackend(): backend exited unexpectedly', { exitCode: code });
-        }
-      });
-
-      // Don't unref since we want to monitor the process
-
-      resolve();
     });
   }
 
@@ -288,8 +357,24 @@ class BackendClient {
 async function startWrapper() {
   const backend = new BackendClient();
 
-  // Pre-connect to backend BEFORE initializing MCP server
-  // This ensures tools/list requests respond immediately without timeout
+  // Handle termination signals first: the pre-connect below can wait for a backend that
+  // this wrapper spawned, and that backend must still be cleaned up if we are killed
+
+  process.on('SIGTERM', () => {
+    backend.cleanup();
+
+    process.exit(0);
+  });
+
+  process.on('SIGINT', () => {
+    backend.cleanup();
+
+    process.exit(0);
+  });
+
+  // Pre-connect to backend BEFORE initializing MCP server. stdin is not read until the
+  // transport starts, so initialize and tools/list are answered only once the backend is
+  // reachable (or the connect deadline has passed)
   try {
     await backend.ensure();
     try {
@@ -313,20 +398,6 @@ async function startWrapper() {
   // When stdin closes (Claude Desktop exits), clean up the backend
 
   process.stdin.on('end', () => {
-    backend.cleanup();
-
-    process.exit(0);
-  });
-
-  // Also handle process termination signals
-
-  process.on('SIGTERM', () => {
-    backend.cleanup();
-
-    process.exit(0);
-  });
-
-  process.on('SIGINT', () => {
     backend.cleanup();
 
     process.exit(0);

@@ -101,7 +101,9 @@
       "Bash(/Users/Adam/Projects/foundry-vtt-mcp/update-wrapper.sh:*)",
       "Bash(/Applications/FoundryMCPServer.app/Contents/Resources/ComfyUI/venv/bin/python /Applications/FoundryMCPServer.app/Contents/Resources/ComfyUI/main.py --help)",
       "Bash(./update-backend-now.sh:*)",
-      "Bash(hdiutil detach:*)"
+      "Bash(hdiutil detach:*)",
+      "mcp__foundry-mcp__get-world-info",
+      "mcp__foundry-mcp__list-compendium-packs"
     ],
     "deny": [],
     "ask": [],

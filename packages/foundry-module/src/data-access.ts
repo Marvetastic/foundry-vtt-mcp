@@ -1,6 +1,13 @@
 import { MODULE_ID, ERROR_MESSAGES, TOKEN_DISPOSITIONS } from './constants.js';
 import { permissionManager } from './permissions.js';
 import { transactionManager } from './transaction-manager.js';
+import {
+  analyzeNimbleLevelUp,
+  type LevelUpAnalysis,
+  type LevelUpFeatureInput,
+  type LevelUpSubclassInput,
+  type LevelUpClassInput,
+} from './nimble-level-up.js';
 // Local type definitions to avoid shared package import issues
 interface CharacterInfo {
   id: string;
@@ -162,12 +169,49 @@ interface MGT2eCreatureIndex {
   img?: string;
 }
 
+// Nimble Enhanced Creature Index
+//
+// Nimble monsters are npc / minion / soloMonster actors. The level is stored
+// as a string ("1/4", "3"); `level` is its numeric value and `levelLabel` the
+// original. `nimbleRole` doubles as the discriminator for this index shape.
+interface NimbleCreatureIndex {
+  id: string;
+  name: string;
+  type: string; // npc | minion | soloMonster
+  pack: string;
+  packLabel: string;
+  level: number;
+  levelLabel: string;
+  nimbleRole: 'minion' | 'flunky' | 'standard' | 'solo';
+  creatureType: string;
+  size: string;
+  armor: string; // none | medium | heavy
+  hitPoints: number;
+  movement: Record<string, number>;
+  hasBloodied: boolean;
+  hasLastStand: boolean;
+  img?: string;
+}
+
 // Union type across all supported systems
 type EnhancedCreatureIndex =
   | DnD5eCreatureIndex
   | PF2eCreatureIndex
   | CosmereRpgCreatureIndex
-  | MGT2eCreatureIndex;
+  | MGT2eCreatureIndex
+  | NimbleCreatureIndex;
+
+function isNimbleCreature(c: EnhancedCreatureIndex): c is NimbleCreatureIndex {
+  return 'nimbleRole' in c;
+}
+
+/** Parse a Nimble level string ("1/4", "3") to a number; NaN when unparseable. */
+function parseNimbleLevel(level: unknown): number {
+  const text = String(level ?? '').trim();
+  const fraction = /^(\d+)\s*\/\s*(\d+)$/.exec(text);
+  if (fraction) return Number(fraction[1]) / Number(fraction[2]);
+  return text === '' ? NaN : Number(text);
+}
 
 interface PersistentIndexMetadata {
   version: string;
@@ -671,6 +715,8 @@ class PersistentCreatureIndex {
       return await this.buildCosmereRpgIndex(force);
     } else if (gameSystem === 'mgt2e') {
       return await this.buildMGT2eIndex(force);
+    } else if (gameSystem === 'nimble') {
+      return await this.buildNimbleIndex(force);
     } else {
       // Unknown system — skip silently rather than blocking world load
       console.warn(
@@ -1515,6 +1561,132 @@ class PersistentCreatureIndex {
         }
       }
     } catch {
+      errors++;
+    }
+
+    return { creatures, errors };
+  }
+
+  // ─── nimble index builder ───────────────────────────────────────────────────
+
+  private async buildNimbleIndex(_force = false): Promise<NimbleCreatureIndex[]> {
+    this.buildInProgress = true;
+    const startTime = Date.now();
+    let totalErrors = 0;
+
+    try {
+      const actorPacks = Array.from(game.packs.values()).filter(
+        pack => pack.metadata.type === 'Actor'
+      );
+      const enhancedCreatures: NimbleCreatureIndex[] = [];
+      const packFingerprints = new Map<string, PackFingerprint>();
+
+      this.info(`Starting Nimble monster index build from ${actorPacks.length} packs...`);
+
+      for (const pack of actorPacks) {
+        if (!pack.indexed) await pack.getIndex({});
+        packFingerprints.set(pack.metadata.id, this.generatePackFingerprint(pack));
+
+        try {
+          const result = await this.extractNimbleDataFromPack(pack);
+          enhancedCreatures.push(...result.creatures);
+          totalErrors += result.errors;
+        } catch (error) {
+          console.warn(`[${this.moduleId}] Failed to process pack ${pack.metadata.label}:`, error);
+          totalErrors++;
+        }
+      }
+
+      await this.savePersistedIndex({
+        metadata: {
+          version: this.INDEX_VERSION,
+          timestamp: Date.now(),
+          packFingerprints,
+          totalCreatures: enhancedCreatures.length,
+          gameSystem: 'nimble',
+        },
+        creatures: enhancedCreatures,
+      });
+
+      const secs = Math.round((Date.now() - startTime) / 1000);
+      const errText = totalErrors > 0 ? ` (${totalErrors} errors)` : '';
+      this.info(
+        `Nimble monster index complete! ${enhancedCreatures.length} monsters indexed in ${secs}s${errText}`
+      );
+
+      return enhancedCreatures;
+    } catch (error) {
+      const msg = `Failed to build Nimble monster index: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      console.error(`[${this.moduleId}] ${msg}`);
+      ui.notifications?.error(msg);
+      throw error;
+    } finally {
+      this.buildInProgress = false;
+    }
+  }
+
+  private async extractNimbleDataFromPack(
+    pack: any
+  ): Promise<{ creatures: NimbleCreatureIndex[]; errors: number }> {
+    const creatures: NimbleCreatureIndex[] = [];
+    let errors = 0;
+
+    try {
+      const documents = await pack.getDocuments();
+      for (const doc of documents) {
+        if (!['npc', 'minion', 'soloMonster'].includes(doc.type)) continue;
+
+        try {
+          const system = doc.system ?? {};
+          const attributes = system.attributes ?? {};
+          const details = system.details ?? {};
+          const subtypes = Array.from(doc.items ?? [])
+            .filter((i: any) => i.type === 'monsterFeature')
+            .map((i: any) => i.system?.subtype);
+
+          const movement: Record<string, number> = {};
+          for (const mode of ['walk', 'fly', 'swim', 'climb', 'burrow']) {
+            const speed = Number(attributes.movement?.[mode] ?? 0);
+            if (speed > 0 || mode === 'walk') movement[mode] = speed;
+          }
+
+          const nimbleRole =
+            doc.type === 'minion'
+              ? 'minion'
+              : doc.type === 'soloMonster'
+                ? 'solo'
+                : details.isFlunky
+                  ? 'flunky'
+                  : 'standard';
+
+          creatures.push({
+            id: doc.id,
+            name: doc.name,
+            type: doc.type,
+            pack: pack.collection,
+            packLabel: pack.metadata?.label ?? pack.collection,
+            level: parseNimbleLevel(details.level),
+            levelLabel: String(details.level ?? ''),
+            nimbleRole,
+            creatureType: details.creatureType ?? '',
+            size: attributes.sizeCategory ?? 'medium',
+            armor: attributes.armor ?? 'none',
+            hitPoints: Number(attributes.hp?.max ?? 0),
+            movement,
+            hasBloodied: subtypes.includes('bloodied'),
+            hasLastStand: subtypes.includes('lastStand'),
+            img: doc.img,
+          });
+        } catch (error) {
+          console.warn(`[${this.moduleId}] Failed to extract Nimble data from ${doc.name}:`, error);
+          errors++;
+        }
+      }
+    } catch (error) {
+      console.warn(
+        `[${this.moduleId}] Failed to load documents from ${pack.metadata.label}:`,
+        error
+      );
       errors++;
     }
 
@@ -3240,6 +3412,7 @@ export class FoundryDataAccess {
       // Sort by power level then name for consistent ordering (system-aware).
       // Power-level dial: tier (cosmere), level (pf2e), challengeRating (dnd5e).
       const powerLevel = (c: EnhancedCreatureIndex): number => {
+        if (isNimbleCreature(c)) return Number.isNaN(c.level) ? 0 : c.level;
         if ('hits' in c && 'hasPsionics' in c) return (c as MGT2eCreatureIndex).hits;
         if ('tier' in c) return (c as CosmereRpgCreatureIndex).tier;
         if ('level' in c) return (c as PF2eCreatureIndex).level;
@@ -3259,6 +3432,32 @@ export class FoundryDataAccess {
 
       // Convert enhanced creatures to result format (system-aware)
       const results = filteredCreatures.map(creature => {
+        if (isNimbleCreature(creature)) {
+          const n = creature;
+          const extraMovement = Object.entries(n.movement)
+            .filter(([mode]) => mode !== 'walk')
+            .map(([mode, speed]) => `, ${mode} ${speed}`)
+            .join('');
+          return {
+            id: n.id,
+            name: n.name,
+            type: n.type,
+            pack: n.pack,
+            packLabel: n.packLabel,
+            hasImage: !!n.img,
+            level: n.levelLabel,
+            role: n.nimbleRole,
+            creatureType: n.creatureType,
+            size: n.size,
+            armor: n.armor,
+            hitPoints: n.hitPoints,
+            movement: n.movement,
+            hasBloodied: n.hasBloodied,
+            hasLastStand: n.hasLastStand,
+            summary: `Level ${n.levelLabel} ${n.nimbleRole}${n.creatureType ? ` ${n.creatureType}` : ''},${n.hitPoints} HP, ${n.armor} armor, ${n.size}${extraMovement} from ${n.packLabel}`,
+          };
+        }
+
         const isMGT2e = 'hits' in creature && 'hasPsionics' in creature;
         const isCosmere = !isMGT2e && 'tier' in creature;
         const isPF2e = !isMGT2e && !isCosmere && 'level' in creature;
@@ -3387,6 +3586,9 @@ export class FoundryDataAccess {
    * narrowest signal), then pf2e, then fall through to dnd5e.
    */
   private passesEnhancedCriteria(creature: EnhancedCreatureIndex, criteria: any): boolean {
+    if (isNimbleCreature(creature)) {
+      return this.passesNimbleCriteria(creature, criteria);
+    }
     if ('hits' in creature && 'hasPsionics' in creature) {
       return this.passesMGT2eCriteria(creature as MGT2eCreatureIndex, criteria);
     }
@@ -3397,6 +3599,45 @@ export class FoundryDataAccess {
       return this.passesPF2eCriteria(creature, criteria);
     }
     return this.passesDnD5eCriteria(creature, criteria);
+  }
+
+  /**
+   * Nimble criteria filter — level (number or range), role, creatureType
+   * (substring), size, armor, hitPoints (number or range), hasBloodied,
+   * hasLastStand.
+   */
+  private passesNimbleCriteria(creature: NimbleCreatureIndex, criteria: any): boolean {
+    const inRange = (value: number, filter: number | { min?: number; max?: number }) => {
+      if (typeof filter === 'number') return value === filter;
+      if (filter.min !== undefined && value < filter.min) return false;
+      if (filter.max !== undefined && value > filter.max) return false;
+      return true;
+    };
+
+    if (criteria.level !== undefined && !inRange(creature.level, criteria.level)) return false;
+    if (criteria.role) {
+      const role = String(criteria.role).toLowerCase();
+      const wanted = role === 'legendary' || role === 'solomonster' ? 'solo' : role;
+      if (creature.nimbleRole !== wanted) return false;
+    }
+    if (
+      criteria.creatureType &&
+      !creature.creatureType.toLowerCase().includes(String(criteria.creatureType).toLowerCase())
+    ) {
+      return false;
+    }
+    if (criteria.size && creature.size !== String(criteria.size).toLowerCase()) return false;
+    if (criteria.armor && creature.armor !== criteria.armor) return false;
+    if (criteria.hitPoints !== undefined && !inRange(creature.hitPoints, criteria.hitPoints)) {
+      return false;
+    }
+    if (criteria.hasBloodied !== undefined && creature.hasBloodied !== criteria.hasBloodied) {
+      return false;
+    }
+    if (criteria.hasLastStand !== undefined && creature.hasLastStand !== criteria.hasLastStand) {
+      return false;
+    }
+    return true;
   }
 
   /**
@@ -4475,6 +4716,358 @@ export class FoundryDataAccess {
   }
 
   /**
+   * Resolve a world JournalEntry by id, "JournalEntry.<id>" UUID, or exact name.
+   * Compendium references are refused.
+   */
+  private resolveWorldJournal(identifier: string): any {
+    if (typeof identifier !== 'string' || identifier.trim().length === 0) {
+      throw new Error('Journal entry identifier is required');
+    }
+    const trimmed = identifier.trim();
+    if (!trimmed.startsWith('Compendium.') && !trimmed.includes('.')) {
+      const byId = game.journal.get(trimmed);
+      if (byId) return byId;
+    }
+    if (trimmed.startsWith('Compendium.') || trimmed.startsWith('JournalEntry.')) {
+      const [id] = resolveWorldDocumentIds([trimmed], 'JournalEntry');
+      const byUuid = game.journal.get(id);
+      if (!byUuid) throw new Error(`Journal entry not found: ${trimmed}`);
+      return byUuid;
+    }
+    const byName = game.journal.filter((j: any) => j.name === trimmed);
+    if (byName.length > 1) {
+      throw new Error(
+        `${byName.length} journal entries are named "${trimmed}"; pass an id instead (${byName.map((j: any) => j.id).join(', ')})`
+      );
+    }
+    if (byName.length === 0) throw new Error(`Journal entry not found: ${trimmed}`);
+    return byName[0];
+  }
+
+  /**
+   * Create a journal entry with arbitrary pages, an optional folder (name or
+   * id, created if absent) and GM-only or player-visible ownership.
+   */
+  async createJournal(request: {
+    name: string;
+    folder?: string;
+    pages: Array<{ name: string; html: string }>;
+    visibility?: 'gm' | 'players';
+  }): Promise<{
+    id: string;
+    name: string;
+    folderId: string | null;
+    pages: Array<{ id: string; name: string }>;
+  }> {
+    this.validateFoundryState();
+
+    const permissionCheck = permissionManager.checkWritePermission('createActor', { quantity: 1 });
+    if (!permissionCheck.allowed) {
+      throw new Error(`Journal creation denied: ${permissionCheck.reason}`);
+    }
+
+    const visibility = request.visibility ?? 'gm';
+    if (visibility !== 'gm' && visibility !== 'players') {
+      throw new Error(`visibility must be "gm" or "players", got "${String(visibility)}"`);
+    }
+
+    try {
+      let folderId: string | null = null;
+      if (request.folder && request.folder.trim().length > 0) {
+        const folderKey = request.folder.trim();
+        const existing = game.folders?.find(
+          (f: any) => f.type === 'JournalEntry' && (f.id === folderKey || f.name === folderKey)
+        );
+        folderId = existing ? existing.id : await this.getOrCreateFolder(folderKey, 'JournalEntry');
+      }
+
+      // DOCUMENT_OWNERSHIP_LEVELS: NONE = 0, OBSERVER = 2
+      const ownership = { default: visibility === 'players' ? 2 : 0 };
+
+      const journal: any = await JournalEntry.create({
+        name: request.name,
+        folder: folderId,
+        ownership,
+        pages: request.pages.map(p => ({ type: 'text', name: p.name, text: { content: p.html } })),
+      } as any);
+      if (!journal) throw new Error('Failed to create journal entry');
+
+      const result = {
+        id: journal.id,
+        name: journal.name,
+        folderId,
+        pages: journal.pages.contents.map((p: any) => ({ id: p.id, name: p.name })),
+      };
+      this.auditLog('createJournal', { name: request.name, visibility }, 'success');
+      return result;
+    } catch (error) {
+      this.auditLog(
+        'createJournal',
+        { name: request.name, visibility },
+        'failure',
+        error instanceof Error ? error.message : 'Unknown error'
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Get a journal entry with every page's full content and ownership.
+   */
+  async getJournalFull(identifier: string): Promise<Record<string, any>> {
+    this.validateFoundryState();
+    const journal = this.resolveWorldJournal(identifier);
+    return {
+      id: journal.id,
+      name: journal.name,
+      folderId: journal.folder?.id ?? null,
+      folderName: journal.folder?.name ?? null,
+      ownership: journal.ownership ?? {},
+      pages: journal.pages.contents.map((page: any) => ({
+        id: page.id,
+        name: page.name,
+        type: page.type,
+        sort: page.sort,
+        ownership: page.ownership ?? {},
+        html: page.type === 'text' ? (page.text?.content ?? '') : undefined,
+        src: page.type === 'text' ? undefined : (page.src ?? null),
+      })),
+    };
+  }
+
+  /**
+   * Replace a page's HTML and/or rename it. Content writes go through
+   * updateJournalContent.
+   */
+  async updateJournalPage(request: {
+    entry: string;
+    pageId: string;
+    html?: string;
+    name?: string;
+  }): Promise<{ success: boolean; pageId?: string | undefined; pageName?: string | undefined }> {
+    const journal = this.resolveWorldJournal(request.entry);
+    const page = journal.pages.get(request.pageId);
+    if (!page) throw new Error(`Page not found: ${request.pageId}`);
+
+    if (request.html !== undefined) {
+      return this.updateJournalContent({
+        journalId: journal.id,
+        pageId: page.id,
+        content: request.html,
+        newPageName: request.name,
+      });
+    }
+    if (request.name === undefined) throw new Error('Provide html and/or name to update');
+
+    const permissionCheck = permissionManager.checkWritePermission('createActor', { quantity: 1 });
+    if (!permissionCheck.allowed) {
+      throw new Error(`Journal update denied: ${permissionCheck.reason}`);
+    }
+    await page.update({ name: request.name });
+    this.auditLog('updateJournalPage', { journalId: journal.id, pageId: page.id }, 'success');
+    return { success: true, pageId: page.id, pageName: request.name };
+  }
+
+  /**
+   * Append HTML to the end of a text page.
+   */
+  async appendJournalPage(request: {
+    entry: string;
+    pageId: string;
+    html: string;
+  }): Promise<{ success: boolean; pageId?: string | undefined; pageName?: string | undefined }> {
+    const journal = this.resolveWorldJournal(request.entry);
+    const page = journal.pages.get(request.pageId);
+    if (!page) throw new Error(`Page not found: ${request.pageId}`);
+    if (page.type !== 'text') throw new Error(`Page "${page.name}" is not a text page`);
+
+    return this.updateJournalContent({
+      journalId: journal.id,
+      pageId: page.id,
+      content: (page.text?.content ?? '') + request.html,
+    });
+  }
+
+  /**
+   * Add a new text page to an existing entry.
+   */
+  async addJournalPage(request: {
+    entry: string;
+    name: string;
+    html: string;
+  }): Promise<{ success: boolean; pageId?: string | undefined; pageName?: string | undefined }> {
+    const journal = this.resolveWorldJournal(request.entry);
+    return this.updateJournalContent({
+      journalId: journal.id,
+      content: request.html,
+      newPageName: request.name,
+    });
+  }
+
+  /**
+   * Delete world journal entries by id. Requires confirm === true; compendium
+   * references are refused.
+   */
+  async deleteJournals(params: { entryIds: string[]; confirm?: boolean }): Promise<{
+    deleted: Array<{ id: string; name: string }>;
+    notFound: string[];
+  }> {
+    this.validateFoundryState();
+
+    if (params.confirm !== true) {
+      throw new Error('Refusing to delete: "confirm: true" is required');
+    }
+
+    const ids = resolveWorldDocumentIds(params.entryIds, 'JournalEntry');
+    const targets: Array<{ id: string; name: string }> = [];
+    const notFound: string[] = [];
+    for (const id of ids) {
+      const journal = game.journal.get(id);
+      if (!journal) {
+        notFound.push(id);
+        continue;
+      }
+      if ((journal as any).pack || (journal as any).compendium) {
+        throw new Error(`Refusing to delete "${journal.name}" (${id}): it belongs to a compendium`);
+      }
+      targets.push({ id: journal.id as string, name: journal.name as string });
+    }
+    if (targets.length === 0) {
+      throw new Error('None of the provided journal entry IDs were found in the world');
+    }
+
+    try {
+      await (JournalEntry as any).deleteDocuments(targets.map(t => t.id));
+      this.auditLog('deleteJournals', { ids: targets.map(t => t.id) }, 'success');
+      return { deleted: targets, notFound };
+    } catch (error) {
+      this.auditLog(
+        'deleteJournals',
+        { ids: targets.map(t => t.id) },
+        'failure',
+        error instanceof Error ? error.message : 'Unknown error'
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * List JournalEntry folders with their parent.
+   */
+  async listJournalFolders(): Promise<
+    Array<{ id: string; name: string; parentId: string | null; parentName: string | null }>
+  > {
+    this.validateFoundryState();
+    return (game.folders?.filter((f: any) => f.type === 'JournalEntry') ?? []).map((f: any) => ({
+      id: f.id,
+      name: f.name,
+      parentId: f.folder?.id ?? null,
+      parentName: f.folder?.name ?? null,
+    }));
+  }
+
+  /**
+   * Nimble only, read-only: report which subclasses and features the
+   * level-up dialog would offer/grant. Gathers world items plus compendium
+   * documents the same way the system does, then runs analyzeNimbleLevelUp
+   * (see nimble-level-up.ts for the mirrored system functions).
+   */
+  async checkNimbleLevelUpGrants(params: {
+    classIdentifier: string;
+    subclassIdentifier?: string;
+    level: number;
+  }): Promise<LevelUpAnalysis> {
+    this.validateFoundryState();
+    if ((game.system as any)?.id !== 'nimble') {
+      throw new Error(
+        `check-level-up-grants only supports the Nimble system (active: ${(game.system as any)?.id})`
+      );
+    }
+
+    const slug = (value: string) => (value ?? '').slugify({ strict: true });
+    const classes: LevelUpClassInput[] = [];
+    const subclasses: LevelUpSubclassInput[] = [];
+    const features: LevelUpFeatureInput[] = [];
+
+    const toFeature = (doc: any, source: 'world' | 'compendium', pack: string | null) => ({
+      uuid: doc.uuid,
+      name: doc.name,
+      source,
+      pack,
+      system: doc.system ?? {},
+    });
+
+    for (const item of (game as any).items) {
+      if (item.type === 'class') {
+        classes.push({ uuid: item.uuid, name: item.name, source: 'world' });
+      } else if (item.type === 'subclass') {
+        subclasses.push({
+          uuid: item.uuid,
+          name: item.name,
+          source: 'world',
+          pack: null,
+          parentClass: item.system?.parentClass ?? '',
+          storedIdentifier: item._source?.system?.identifier ?? null,
+        });
+      } else if (item.type === 'feature') {
+        features.push(toFeature(item, 'world', null));
+      }
+    }
+
+    // Read-only pack access: index lookups and getDocument() only.
+    const indexFields = [
+      'system.class',
+      'system.subclass',
+      'system.gainedAtLevel',
+      'system.gainedAtLevels',
+      'system.group',
+      'system.parentClass',
+    ];
+    for (const pack of (game as any).packs) {
+      if (pack.documentName !== 'Item') continue;
+      const index = await pack.getIndex({ fields: indexFields });
+      for (const entry of index) {
+        if (entry.type === 'class') {
+          classes.push({ uuid: entry.uuid, name: entry.name, source: 'compendium' });
+        } else if (entry.type === 'subclass') {
+          // getSubclassChoices loads every subclass document to read parentClass.
+          const doc = await pack.getDocument(entry._id);
+          if (!doc) continue;
+          subclasses.push({
+            uuid: doc.uuid,
+            name: doc.name,
+            source: 'compendium',
+            pack: pack.collection,
+            parentClass: doc.system?.parentClass ?? '',
+            storedIdentifier: doc._source?.system?.identifier ?? null,
+          });
+        } else if (entry.type === 'feature') {
+          const sys = entry.system ?? {};
+          const relevant =
+            sys.class === params.classIdentifier ||
+            (!sys.class && sys.group === params.classIdentifier);
+          if (!relevant) continue;
+          // Full document needed for activation effects and levelUpOptions.
+          const doc = await pack.getDocument(entry._id);
+          if (doc) features.push(toFeature(doc, 'compendium', pack.collection));
+        }
+      }
+    }
+
+    return analyzeNimbleLevelUp(
+      {
+        classIdentifier: params.classIdentifier,
+        ...(params.subclassIdentifier ? { subclassIdentifier: params.subclassIdentifier } : {}),
+        level: params.level,
+        classes,
+        subclasses,
+        features,
+      },
+      slug
+    );
+  }
+
+  /**
    * Create actors from compendium entries with custom names
    */
   async createActorFromCompendium(request: ActorCreationRequest): Promise<ActorCreationResult> {
@@ -5219,6 +5812,92 @@ export class FoundryDataAccess {
       this.auditLog(
         'createWorldItems',
         { folder: folder ?? null, count: payload.length },
+        'failure',
+        error instanceof Error ? error.message : 'Unknown error'
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Read back world-level Items with their full stored system data and effects.
+   * Ids may be plain ids or "Item.<id>" UUIDs; compendium references are refused.
+   */
+  async getWorldItems(params: { itemIds: string[] }): Promise<{
+    items: Array<Record<string, any>>;
+    notFound: string[];
+  }> {
+    this.validateFoundryState();
+
+    const ids = resolveWorldDocumentIds(params.itemIds, 'Item');
+    const items: Array<Record<string, any>> = [];
+    const notFound: string[] = [];
+
+    for (const id of ids) {
+      const item = (game as any).items?.get(id);
+      if (!item) {
+        notFound.push(id);
+        continue;
+      }
+      const source = item.toObject();
+      items.push({
+        id: item.id,
+        uuid: item.uuid,
+        name: item.name,
+        type: item.type,
+        img: item.img ?? null,
+        folderId: item.folder?.id ?? null,
+        folderName: item.folder?.name ?? null,
+        system: source.system ?? {},
+        effects: source.effects ?? [],
+      });
+    }
+
+    return { items, notFound };
+  }
+
+  /**
+   * Delete world-level Items by id. Requires confirm === true. Refuses any
+   * compendium reference and never touches packs.
+   */
+  async deleteWorldItems(params: { itemIds: string[]; confirm?: boolean }): Promise<{
+    deleted: Array<{ id: string; name: string }>;
+    notFound: string[];
+  }> {
+    this.validateFoundryState();
+
+    if (params.confirm !== true) {
+      throw new Error('Refusing to delete: "confirm: true" is required');
+    }
+
+    const ids = resolveWorldDocumentIds(params.itemIds, 'Item');
+    const targets: Array<{ id: string; name: string }> = [];
+    const notFound: string[] = [];
+
+    for (const id of ids) {
+      const item = (game as any).items?.get(id);
+      if (!item) {
+        notFound.push(id);
+        continue;
+      }
+      if (item.pack || item.compendium) {
+        throw new Error(`Refusing to delete "${item.name}" (${id}): it belongs to a compendium`);
+      }
+      targets.push({ id: item.id, name: item.name });
+    }
+
+    if (targets.length === 0) {
+      throw new Error('None of the provided item IDs were found in the world');
+    }
+
+    try {
+      await (Item as any).deleteDocuments(targets.map(t => t.id));
+      this.auditLog('deleteWorldItems', { ids: targets.map(t => t.id) }, 'success');
+      return { deleted: targets, notFound };
+    } catch (error) {
+      this.auditLog(
+        'deleteWorldItems',
+        { ids: targets.map(t => t.id) },
         'failure',
         error instanceof Error ? error.message : 'Unknown error'
       );
@@ -10893,6 +11572,24 @@ export class FoundryDataAccess {
         };
       }
 
+      // Nimble monsters: size the prototype token from sizeCategory, using the
+      // same map as the system's own stat-block importer. The system's
+      // _preCreate hooks only set sight/disposition/actorLink, not dimensions.
+      if (gameSystemId === 'nimble' && ['npc', 'minion', 'soloMonster'].includes(a.type)) {
+        const NIMBLE_TOKEN_SIZES: Record<string, number> = {
+          tiny: 0.5,
+          small: 0.5,
+          medium: 1,
+          large: 2,
+          huge: 3,
+          gargantuan: 4,
+        };
+        const tokenSize = NIMBLE_TOKEN_SIZES[systemData.attributes?.sizeCategory];
+        if (tokenSize !== undefined) {
+          doc.prototypeToken = { width: tokenSize, height: tokenSize };
+        }
+      }
+
       doc.system = systemData;
       if (folderId) doc.folder = folderId;
       return doc;
@@ -11188,6 +11885,41 @@ export class FoundryDataAccess {
   }
 
   // ─── mgt2e ──────────────────────────────────────────────────────────────────
+}
+
+// =============================================================================
+// World-document id helpers
+// =============================================================================
+
+/**
+ * Normalise ids for world-only operations. Accepts plain ids and
+ * "<DocumentName>.<id>" UUIDs; throws on compendium UUIDs or any other
+ * reference so deletes can never reach a pack.
+ */
+export function resolveWorldDocumentIds(
+  ids: unknown,
+  documentName: 'Item' | 'JournalEntry'
+): string[] {
+  if (!Array.isArray(ids) || ids.length === 0) {
+    throw new Error('At least one id is required');
+  }
+  return ids.map((raw, idx) => {
+    if (typeof raw !== 'string' || raw.trim().length === 0) {
+      throw new Error(`ids[${idx}] must be a non-empty string`);
+    }
+    const id = raw.trim();
+    if (id.startsWith('Compendium.')) {
+      throw new Error(`Refusing "${id}": compendium documents cannot be modified by this tool`);
+    }
+    const prefix = `${documentName}.`;
+    if (id.startsWith(prefix) && !id.slice(prefix.length).includes('.')) {
+      return id.slice(prefix.length);
+    }
+    if (id.includes('.')) {
+      throw new Error(`"${id}" is not a world ${documentName} id`);
+    }
+    return id;
+  });
 }
 
 // =============================================================================

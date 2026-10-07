@@ -28,6 +28,8 @@ import { ActorManagementTools } from './tools/actor-management.js';
 import { EffectManagementTools } from './tools/effect-management.js';
 
 import { QuestCreationTools } from './tools/quest-creation.js';
+import { JournalManagementTools } from './tools/journal-management.js';
+import { NimbleLevelUpGrantsTools } from './tools/nimble/level-up-grants.js';
 
 import { DiceRollTools } from './tools/dice-roll.js';
 
@@ -1175,6 +1177,7 @@ async function startBackend(): Promise<void> {
   const { CosmereRpgAdapter } = await import('./systems/cosmere-rpg/adapter.js');
   const { WFRP4eAdapter } = await import('./systems/wfrp4e/adapter.js');
   const { MGT2eAdapter } = await import('./systems/mgt2e/adapter.js');
+  const { NimbleAdapter } = await import('./systems/nimble/adapter.js');
 
   const systemRegistry = getSystemRegistry(logger);
   systemRegistry.register(new DnD5eAdapter());
@@ -1183,6 +1186,7 @@ async function startBackend(): Promise<void> {
   systemRegistry.register(new CosmereRpgAdapter());
   systemRegistry.register(new WFRP4eAdapter());
   systemRegistry.register(new MGT2eAdapter());
+  systemRegistry.register(new NimbleAdapter());
 
   logger.info('System registry initialized', {
     supportedSystems: systemRegistry.getSupportedSystems(),
@@ -1209,6 +1213,8 @@ async function startBackend(): Promise<void> {
   });
 
   const questCreationTools = new QuestCreationTools({ foundryClient, logger });
+  const journalManagementTools = new JournalManagementTools({ foundryClient, logger });
+  const nimbleLevelUpGrantsTools = new NimbleLevelUpGrantsTools({ foundryClient, logger });
 
   const diceRollTools = new DiceRollTools({ foundryClient, logger });
 
@@ -1435,6 +1441,9 @@ async function startBackend(): Promise<void> {
     ...dnd5eFeaturesFromCompendiumTools.getToolDefinitions(),
 
     ...questCreationTools.getToolDefinitions(),
+    ...journalManagementTools.getToolDefinitions(),
+
+    ...nimbleLevelUpGrantsTools.getToolDefinitions(),
 
     ...diceRollTools.getToolDefinitions(),
 
@@ -1675,6 +1684,18 @@ async function startBackend(): Promise<void> {
 
                 case 'search-journals':
                   result = await questCreationTools.handleSearchJournals(args);
+
+                  break;
+
+                case 'manage-journals':
+                  result = await journalManagementTools.handleManageJournals(args);
+
+                  break;
+
+                // Nimble tools
+
+                case 'check-level-up-grants':
+                  result = await nimbleLevelUpGrantsTools.handleCheckLevelUpGrants(args);
 
                   break;
 

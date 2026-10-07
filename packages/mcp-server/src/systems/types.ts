@@ -11,7 +11,15 @@ import { z } from 'zod';
  * Supported game system identifiers
  * Extend this type when adding new systems
  */
-export type SystemId = 'dnd5e' | 'pf2e' | 'dsa5' | 'cosmere-rpg' | 'wfrp4e' | 'mgt2e' | 'other';
+export type SystemId =
+  | 'dnd5e'
+  | 'pf2e'
+  | 'dsa5'
+  | 'cosmere-rpg'
+  | 'wfrp4e'
+  | 'mgt2e'
+  | 'nimble'
+  | 'other';
 
 /**
  * System metadata returned by adapters
@@ -339,6 +347,37 @@ export interface MGT2eCreatureIndex extends SystemCreatureIndex {
 }
 
 /**
+ * Nimble RPG specific creature index structure
+ *
+ * Monsters are `npc`, `minion` or `soloMonster` actors. Level is stored by the
+ * system as a string ("1/4", "3"); `level` here is its numeric value.
+ */
+export interface NimbleCreatureIndex extends SystemCreatureIndex {
+  system: 'nimble';
+  systemData: {
+    /** Numeric level (fractions resolved, e.g. "1/4" -> 0.25). */
+    level?: number;
+    /** Level exactly as stored in system.details.level. */
+    levelLabel?: string;
+    /** Encounter role derived from actor type and isFlunky. */
+    role?: 'minion' | 'flunky' | 'standard' | 'solo';
+    /** Free-text creature type/family (e.g. "Goblins", "Undead"). */
+    creatureType?: string;
+    size?: string;
+    /** none | medium | heavy */
+    armor?: string;
+    hitPoints?: number;
+    /** Non-zero movement speeds (walk is always present). */
+    movement?: Record<string, number>;
+    /** Saves with non-normal roll modes, e.g. { strength: 1, will: -1 }. */
+    saveRollModes?: Record<string, number>;
+    hasBloodied: boolean;
+    hasLastStand: boolean;
+    featureCount?: number;
+  };
+}
+
+/**
  * Generic creature index for unsupported systems
  */
 export interface GenericCreatureIndex extends SystemCreatureIndex {
@@ -356,4 +395,5 @@ export type AnyCreatureIndex =
   | CosmereRpgCreatureIndex
   | WFRP4eCreatureIndex
   | MGT2eCreatureIndex
+  | NimbleCreatureIndex
   | GenericCreatureIndex;

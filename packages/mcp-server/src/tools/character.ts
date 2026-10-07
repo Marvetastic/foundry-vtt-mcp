@@ -148,6 +148,8 @@ export class CharacterTools {
           '- "create": Create world-level Items in the sidebar (not actor-attached). Good for reusable libraries. GM-only.\n' +
           '- "list": List world-level Items with optional type/folder/name filters.\n' +
           '- "update": Update existing world-level Items by ID. GM-only.\n' +
+          '- "get": Read back world-level Items by itemIds: name, type, img, folder, the FULL system data and effects. Use it to verify fields after create/update.\n' +
+          '- "delete": Permanently delete world-level Items by itemIds. Requires confirm:true. Compendium items are always refused. GM-only.\n' +
           '- "add-to-actor": Create and attach Items directly to an existing actor. GM-only.\n' +
           '- "remove-from-actor": Delete Items already on an actor, identified by itemIds and/or itemNames (optionally constrained by type). GM-only.\n' +
           '- "describe": Returns system-specific enum/schema reference for all item field values. ' +
@@ -159,9 +161,18 @@ export class CharacterTools {
           properties: {
             action: {
               type: 'string',
-              enum: ['create', 'list', 'update', 'add-to-actor', 'remove-from-actor', 'describe'],
+              enum: [
+                'create',
+                'list',
+                'update',
+                'get',
+                'delete',
+                'add-to-actor',
+                'remove-from-actor',
+                'describe',
+              ],
               description:
-                'Operation to perform: "create" world items, "list" world items, "update" world items by id, "add-to-actor" to attach items to an actor, "remove-from-actor" to delete items from an actor, or "describe" to get system-specific enum reference (mgt2e: weapon traits, scales, armour forms, hardware systems, etc.).',
+                'Operation to perform: "create" world items, "list" world items, "update" world items by id, "get" full data of world items by id, "delete" world items by id (requires confirm:true), "add-to-actor" to attach items to an actor, "remove-from-actor" to delete items from an actor, or "describe" to get system-specific enum reference (mgt2e: weapon traits, scales, armour forms, hardware systems, etc.).',
             },
             items: {
               type: 'array',
@@ -238,8 +249,12 @@ export class CharacterTools {
             itemIds: {
               type: 'array',
               description:
-                'For "remove-from-actor": ids of items already on the actor to delete (most reliable; get them from get-character).',
+                'For "get" and "delete": ids of world items. For "remove-from-actor": ids of items already on the actor to delete (most reliable; get them from get-character).',
               items: { type: 'string' },
+            },
+            confirm: {
+              type: 'boolean',
+              description: 'Required (must be true) for "delete".',
             },
             itemNames: {
               type: 'array',
@@ -644,6 +659,8 @@ export class CharacterTools {
           'create',
           'list',
           'update',
+          'get',
+          'delete',
           'add-to-actor',
           'remove-from-actor',
           'describe',
@@ -658,12 +675,69 @@ export class CharacterTools {
         return this.handleListWorldItems(args);
       case 'update':
         return this.handleUpdateWorldItems(args);
+      case 'get':
+        return this.handleGetWorldItems(args);
+      case 'delete':
+        return this.handleDeleteWorldItems(args);
       case 'add-to-actor':
         return this.handleAddActorItems(args);
       case 'remove-from-actor':
         return this.handleRemoveActorItems(args);
       case 'describe':
         return this.handleDescribeSystemSchema();
+    }
+  }
+
+  async handleGetWorldItems(args: any): Promise<any> {
+    const { itemIds } = z
+      .object({
+        itemIds: z.array(z.string().min(1)).min(1, 'Provide at least one id in itemIds'),
+      })
+      .parse(args);
+
+    this.logger.info('Getting world items', { count: itemIds.length });
+
+    try {
+      return await this.foundryClient.query('foundry-mcp-bridge.getWorldItems', { itemIds });
+    } catch (error) {
+      this.logger.error('Failed to get world items', error);
+      throw new Error(
+        `Failed to get world items: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  async handleDeleteWorldItems(args: any): Promise<any> {
+    const { itemIds } = z
+      .object({
+        itemIds: z
+          .array(
+            z
+              .string()
+              .min(1)
+              .refine(id => !id.startsWith('Compendium.'), {
+                message: 'Compendium items cannot be deleted; only world items',
+              })
+          )
+          .min(1, 'Provide at least one id in itemIds'),
+        confirm: z.literal(true, {
+          errorMap: () => ({ message: 'Deleting requires confirm: true' }),
+        }),
+      })
+      .parse(args);
+
+    this.logger.info('Deleting world items', { ids: itemIds });
+
+    try {
+      return await this.foundryClient.query('foundry-mcp-bridge.deleteWorldItems', {
+        itemIds,
+        confirm: true,
+      });
+    } catch (error) {
+      this.logger.error('Failed to delete world items', error);
+      throw new Error(
+        `Failed to delete world items: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
     }
   }
 
