@@ -113,7 +113,7 @@ Once connected, ask Claude Desktop:
 
 ## Features
 
-- **48 MCP Tools** that allow Claude to interact with Foundry
+- **49 MCP Tools** that allow Claude to interact with Foundry
 - **D&D 5e NPC Creation Suite**: Build complete NPCs from prompts — stat block, attacks, saves, auras, and spellcasting
 - **Mongoose Traveller 2e (mgt2e) Support**: Full actor lifecycle — create/update/delete travellers, NPCs, creatures, and spacecraft with skill shorthand normalisation; creature compendium index with characteristic DMs; weapon-trait enum reference
 - **WFRP4e Support**: Character reading plus editing — update characteristics, wounds, skills and careers, and add or remove items on existing actors
@@ -172,15 +172,16 @@ Once connected, ask Claude Desktop:
 - **37** create-actor-from-compendium
 - **38** list-dsa5-archetypes (DSA5 Only)
 - **39** create-dsa5-character-from-archetype (DSA5 Only)
-- **40** create-campaign-dashboard
-- **41** manage-world-items (create / list / get / update world items, add items to actor, describe system enum schema)
-- **42** manage-effects (create / update / delete ActiveEffects on actors or their items)
-- **43** dnd5e-create-npc (D&D 5e Only)
-- **44** dnd5e-add-feature (D&D 5e Only)
-- **45** dnd5e-add-features-from-compendium (D&D 5e Only)
-- **46** manage-actors (create / update / delete / place actors; update / delete embedded items — any system)
-- **47** wfrp4e-update-actor (WFRP4e Only)
-- **48** wfrp4e-add-items (WFRP4e Only)
+- **40** import-dsa5-actor-from-json (DSA5 Only)
+- **41** create-campaign-dashboard
+- **42** manage-world-items (create / list / get / update world items, add items to actor, describe system enum schema)
+- **43** manage-effects (create / update / delete ActiveEffects on actors or their items)
+- **44** dnd5e-create-npc (D&D 5e Only)
+- **45** dnd5e-add-feature (D&D 5e Only)
+- **46** dnd5e-add-features-from-compendium (D&D 5e Only)
+- **47** manage-actors (create / update / delete / place actors; update / delete embedded items — any system)
+- **48** wfrp4e-update-actor (WFRP4e Only)
+- **49** wfrp4e-add-items (WFRP4e Only)
 
 ## Settings
 
