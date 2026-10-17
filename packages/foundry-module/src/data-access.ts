@@ -4106,8 +4106,19 @@ export class FoundryDataAccess {
       key === 'save' &&
       parentPath[parentPath.length - 2] === 'abilities';
 
+    // `key` is structural, not a credential, inside PF2e rule elements (rules[i].key
+    // names the element type, e.g. FlatModifier) and ActiveEffect changes
+    // (changes[i].key is the attribute path being modified). Stripping it there
+    // left both unreadable on every read path.
+    const isStructuralKey =
+      key === 'key' &&
+      ['rules', 'changes'].includes(parentPath[parentPath.length - 2]) &&
+      /^\d+$/.test(parentPath[parentPath.length - 1] ?? '');
+
     return (
-      sensitiveKeys.includes(key) || problematicKeys.includes(key) || isDeprecatedDnd5eAbilitySave
+      (sensitiveKeys.includes(key) && !isStructuralKey) ||
+      problematicKeys.includes(key) ||
+      isDeprecatedDnd5eAbilitySave
     );
   }
 
