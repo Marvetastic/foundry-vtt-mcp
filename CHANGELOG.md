@@ -1,3 +1,9 @@
+## Unreleased
+
+### New Features
+
+- **DSA5 character import from JSON** (#92) — `import-dsa5-actor-from-json` creates a DSA5 actor from a Dark Aid export, an Optolith-style or custom DSA5 JSON, or a raw Foundry actor export, passed inline or as a `.json` / `.tdc` file (10 MB limit). Re-importing with `updateExisting` updates the existing actor, its items and effects instead of creating a duplicate. Item matching against compendiums currently works in German-language worlds only. DSA5 worlds only.
+
 ## v0.8.5 (2026-10-17)
 
 ### New Features
