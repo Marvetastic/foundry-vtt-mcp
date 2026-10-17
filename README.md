@@ -173,7 +173,7 @@ Once connected, ask Claude Desktop:
 - **38** list-dsa5-archetypes (DSA5 Only)
 - **39** create-dsa5-character-from-archetype (DSA5 Only)
 - **40** create-campaign-dashboard
-- **41** manage-world-items (create / list / update world items, add items to actor, describe system enum schema)
+- **41** manage-world-items (create / list / get / update world items, add items to actor, describe system enum schema)
 - **42** manage-effects (create / update / delete ActiveEffects on actors or their items)
 - **43** dnd5e-create-npc (D&D 5e Only)
 - **44** dnd5e-add-feature (D&D 5e Only)
