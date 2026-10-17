@@ -127,6 +127,7 @@ export class QueryHandlers {
     // World-level item CRUD
     CONFIG.queries[`${modulePrefix}.createWorldItems`] = this.handleCreateWorldItems.bind(this);
     CONFIG.queries[`${modulePrefix}.listWorldItems`] = this.handleListWorldItems.bind(this);
+    CONFIG.queries[`${modulePrefix}.getWorldItem`] = this.handleGetWorldItem.bind(this);
     CONFIG.queries[`${modulePrefix}.updateWorldItems`] = this.handleUpdateWorldItems.bind(this);
     CONFIG.queries[`${modulePrefix}.getSystemSchema`] = this.handleGetSystemSchema.bind(this);
 
@@ -1792,6 +1793,27 @@ export class QueryHandlers {
     } catch (error) {
       throw new Error(
         `Failed to list world items: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  private async handleGetWorldItem(data: { itemIdentifier: string }): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+
+      if (!data?.itemIdentifier) {
+        throw new Error('itemIdentifier is required');
+      }
+
+      return await this.dataAccess.getWorldItem({ itemIdentifier: data.itemIdentifier });
+    } catch (error) {
+      throw new Error(
+        `Failed to get world item: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
     }
   }
