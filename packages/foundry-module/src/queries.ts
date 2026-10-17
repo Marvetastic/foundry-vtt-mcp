@@ -1,6 +1,7 @@
 import { MODULE_ID } from './constants.js';
 import { FoundryDataAccess } from './data-access.js';
 import { ComfyUIManager } from './comfyui-manager.js';
+import { guardQueryHandler } from './query-guard.js';
 
 export class QueryHandlers {
   public dataAccess: FoundryDataAccess;
@@ -164,6 +165,14 @@ export class QueryHandlers {
     CONFIG.queries[`${modulePrefix}.addSpellsToActor`] = this.handleAddSpellsToActor.bind(this);
     CONFIG.queries[`${modulePrefix}.addFeaturesFromCompendium`] =
       this.handleAddFeaturesFromCompendium.bind(this);
+
+    // SECURITY: these handlers are reachable by any connected user through Foundry's
+    // User#query, so only accept those calls from a GM. See query-guard.ts.
+    for (const key of Object.keys(CONFIG.queries)) {
+      if (key.startsWith(`${modulePrefix}.`)) {
+        CONFIG.queries[key] = guardQueryHandler(key, CONFIG.queries[key]);
+      }
+    }
   }
 
   /**
