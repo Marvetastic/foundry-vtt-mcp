@@ -224,8 +224,49 @@ export function validateRuleSource(
       .filter(Boolean);
     return { valid: false, problems: problems.length ? problems : ['Rule failed validation'] };
   } catch (error) {
+    // Strict construction can throw from Foundry internals (e.g. reading `name` of a missing
+    // parent item) instead of listing the bad fields, so name what we can from the schema.
+    const described = Object.entries((Cls.schema?.fields ?? {}) as Record<string, FieldLike>).map(
+      ([key, field]) => describeField(key, field)
+    );
+    const problems = findChoiceProblems(described, source);
+    if (problems.length) return { valid: false, problems };
     return { valid: false, problems: [error instanceof Error ? error.message : String(error)] };
   }
+}
+
+/** Report values that are not among a field's allowed choices (recursing into schemas/arrays). */
+export function findChoiceProblems(
+  fields: FieldDescription[],
+  source: Record<string, unknown>,
+  prefix = ''
+): string[] {
+  const problems: string[] = [];
+  for (const field of fields) {
+    const value = source?.[field.name];
+    if (value === undefined || value === null) continue;
+    const path = `${prefix}${field.name}`;
+    if (field.choices && !field.choices.includes(String(value))) {
+      problems.push(`${path}: "${String(value)}" is not one of ${field.choices.join(', ')}`);
+    }
+    if (field.fields && field.kind === 'SchemaField' && typeof value === 'object') {
+      problems.push(
+        ...findChoiceProblems(field.fields, value as Record<string, unknown>, `${path}.`)
+      );
+    }
+    if (field.element?.fields && Array.isArray(value)) {
+      value.forEach((entry, index) => {
+        problems.push(
+          ...findChoiceProblems(
+            field.element!.fields!,
+            entry as Record<string, unknown>,
+            `${path}[${index}].`
+          )
+        );
+      });
+    }
+  }
+  return problems;
 }
 
 export function describeNimbleRules(params: {

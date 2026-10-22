@@ -167,9 +167,9 @@ export class CharacterTools {
         description:
           'Manage Item documents in Foundry VTT. Specify the operation with "action":\n' +
           '- "create": Create world-level Items in the sidebar (not actor-attached). Good for reusable libraries. GM-only.\n' +
-          '- "list": List world-level Items with optional type/folder/name filters.\n' +
+          '- "list": List world-level Items with optional type/folder/name filters. Returns names and ids only.\n' +
           '- "update": Update existing world-level Items by ID. GM-only.\n' +
-          '- "get": Read back world-level Items by itemIds: name, type, img, folder, the FULL system data and effects. Use it to verify fields after create/update.\n' +
+          '- "get": Read world-level Items in full (name, type, img, folder, the FULL system data, effects and description). Pass itemIdentifier (id or exact name) for one item, or itemIds for several. Use it to verify fields after create/update. GM-only.\n' +
           '- "delete": Permanently delete world-level Items by itemIds. Requires confirm:true. Compendium items are always refused. GM-only.\n' +
           '- "add-to-actor": Create and attach Items directly to an existing actor. GM-only.\n' +
           '- "remove-from-actor": Delete Items already on an actor, identified by itemIds and/or itemNames (optionally constrained by type). GM-only.\n' +
@@ -261,6 +261,11 @@ export class CharacterTools {
             nameFilter: {
               type: 'string',
               description: 'For "list": case-insensitive substring match on item name.',
+            },
+            itemIdentifier: {
+              type: 'string',
+              description:
+                'For "get": id or exact name of the world Item to read. Use an id if several items share a name.',
             },
             actorIdentifier: {
               type: 'string',
@@ -648,6 +653,25 @@ export class CharacterTools {
     }
   }
 
+  async handleGetWorldItem(args: any): Promise<any> {
+    const { itemIdentifier } = z
+      .object({
+        itemIdentifier: z.string().trim().min(1, 'itemIdentifier is required for "get"'),
+      })
+      .parse(args);
+
+    this.logger.info('Getting world item', { itemIdentifier });
+
+    try {
+      return await this.foundryClient.query('foundry-mcp-bridge.getWorldItem', { itemIdentifier });
+    } catch (error) {
+      this.logger.error('Failed to get world item', error);
+      throw new Error(
+        `Failed to get world item "${itemIdentifier}": ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
   async handleCreateWorldItems(args: any): Promise<any> {
     const itemSchema = z.object({
       name: z.string().min(1, 'Item name cannot be empty'),
@@ -697,8 +721,8 @@ export class CharacterTools {
         action: z.enum([
           'create',
           'list',
-          'update',
           'get',
+          'update',
           'delete',
           'add-to-actor',
           'remove-from-actor',
@@ -712,10 +736,15 @@ export class CharacterTools {
         return this.handleCreateWorldItems(args);
       case 'list':
         return this.handleListWorldItems(args);
+      case 'get':
+        if (args?.itemIdentifier === undefined && args?.itemIds === undefined) {
+          throw new Error('"get" requires itemIdentifier (one item) or itemIds (several items)');
+        }
+        return args?.itemIdentifier !== undefined && args?.itemIds === undefined
+          ? this.handleGetWorldItem(args)
+          : this.handleGetWorldItems(args);
       case 'update':
         return this.handleUpdateWorldItems(args);
-      case 'get':
-        return this.handleGetWorldItems(args);
       case 'delete':
         return this.handleDeleteWorldItems(args);
       case 'add-to-actor':

@@ -4351,8 +4351,19 @@ export class FoundryDataAccess {
       key === 'save' &&
       parentPath[parentPath.length - 2] === 'abilities';
 
+    // `key` is structural, not a credential, inside PF2e rule elements (rules[i].key
+    // names the element type, e.g. FlatModifier) and ActiveEffect changes
+    // (changes[i].key is the attribute path being modified). Stripping it there
+    // left both unreadable on every read path.
+    const isStructuralKey =
+      key === 'key' &&
+      ['rules', 'changes'].includes(parentPath[parentPath.length - 2]) &&
+      /^\d+$/.test(parentPath[parentPath.length - 1] ?? '');
+
     return (
-      sensitiveKeys.includes(key) || problematicKeys.includes(key) || isDeprecatedDnd5eAbilitySave
+      (sensitiveKeys.includes(key) && !isStructuralKey) ||
+      problematicKeys.includes(key) ||
+      isDeprecatedDnd5eAbilitySave
     );
   }
 
@@ -5923,6 +5934,203 @@ export class FoundryDataAccess {
     }
   }
 
+  async createActorFromData(request: {
+    actorData: Record<string, unknown>;
+    addToScene?: boolean;
+    updateExisting?: boolean;
+    existingActorIdentifier?: string;
+    preserveItemTypes?: string[];
+    placement?: {
+      type: 'random' | 'grid' | 'center' | 'coordinates';
+      coordinates?: { x: number; y: number }[];
+    };
+  }): Promise<{
+    success: boolean;
+    actor?: { id: string; name: string; type: string };
+    updatedExisting?: boolean;
+    tokensPlaced?: number;
+    errors?: string[];
+  }> {
+    this.validateFoundryState();
+
+    const permissionCheck = permissionManager.checkWritePermission('createActor', { quantity: 1 });
+    if (!permissionCheck.allowed) {
+      throw new Error(`${ERROR_MESSAGES.ACCESS_DENIED}: ${permissionCheck.reason}`);
+    }
+    permissionManager.auditPermissionCheck('createActor', permissionCheck, request);
+
+    try {
+      const actorData = foundry.utils.deepClone(request.actorData) as any;
+
+      delete actorData._id;
+      delete actorData.sort;
+
+      if (!actorData.name || typeof actorData.name !== 'string') {
+        throw new Error('actorData.name is required and must be a string');
+      }
+      if (!actorData.type || typeof actorData.type !== 'string') {
+        actorData.type = 'character';
+      }
+      if (!actorData.system || typeof actorData.system !== 'object') {
+        actorData.system = {};
+      }
+
+      if (Array.isArray(actorData.items)) {
+        actorData.items = actorData.items
+          .filter((item: any) => item && typeof item === 'object')
+          .map((item: any) => {
+            const clonedItem = foundry.utils.deepClone(item);
+            delete clonedItem._id;
+            delete clonedItem.folder;
+            delete clonedItem.sort;
+            return clonedItem;
+          });
+      } else {
+        actorData.items = [];
+      }
+
+      if (Array.isArray(actorData.effects)) {
+        actorData.effects = actorData.effects
+          .filter((effect: any) => effect && typeof effect === 'object')
+          .map((effect: any) => {
+            const clonedEffect = foundry.utils.deepClone(effect);
+            delete clonedEffect._id;
+            delete clonedEffect.folder;
+            delete clonedEffect.sort;
+            return clonedEffect;
+          });
+      } else {
+        actorData.effects = [];
+      }
+
+      if (actorData.prototypeToken?.texture?.src?.startsWith('http')) {
+        actorData.prototypeToken.texture.src = null;
+      }
+
+      if (!actorData.folder) {
+        const folderId = await this.getOrCreateFolder('Foundry MCP Imported Actors', 'Actor');
+        if (folderId) {
+          actorData.folder = folderId;
+        }
+      }
+
+      const incomingItems = actorData.items;
+      const incomingEffects = actorData.effects;
+      delete actorData.items;
+      delete actorData.effects;
+
+      const existingActor =
+        request.updateExisting && request.existingActorIdentifier
+          ? this.findActorByIdentifier(request.existingActorIdentifier)
+          : undefined;
+      const updatedExisting = Boolean(existingActor);
+      let resultActor: any;
+
+      if (existingActor) {
+        await existingActor.update(actorData);
+
+        const preservedTypes = new Set(request.preserveItemTypes ?? []);
+        const existingItemsByKey = new Map<string, any[]>();
+        for (const item of Array.from<any>(existingActor.items || [])) {
+          if (preservedTypes.has(item.type)) continue;
+          const key = `${item.type}::${String(item.name).toLowerCase()}`;
+          const items = existingItemsByKey.get(key) ?? [];
+          items.push(item);
+          existingItemsByKey.set(key, items);
+        }
+
+        const itemUpdates: any[] = [];
+        const itemsToCreate: any[] = [];
+        for (const item of Array.isArray(incomingItems) ? incomingItems : []) {
+          if (preservedTypes.has(item.type)) continue;
+          const key = `${item.type}::${String(item.name).toLowerCase()}`;
+          const matchingItem = existingItemsByKey.get(key)?.shift();
+          if (matchingItem) itemUpdates.push({ ...item, _id: matchingItem.id });
+          else itemsToCreate.push(item);
+        }
+
+        if (itemUpdates.length > 0) {
+          await existingActor.updateEmbeddedDocuments('Item', itemUpdates);
+        }
+        if (itemsToCreate.length > 0) {
+          await existingActor.createEmbeddedDocuments('Item', itemsToCreate);
+        }
+
+        const existingEffectsByKey = new Map<string, any[]>();
+        for (const effect of Array.from<any>(existingActor.effects || [])) {
+          const key = `${effect.type}::${String(effect.name).toLowerCase()}`;
+          const effects = existingEffectsByKey.get(key) ?? [];
+          effects.push(effect);
+          existingEffectsByKey.set(key, effects);
+        }
+
+        const effectUpdates: any[] = [];
+        const effectsToCreate: any[] = [];
+        for (const effect of Array.isArray(incomingEffects) ? incomingEffects : []) {
+          const key = `${effect.type}::${String(effect.name).toLowerCase()}`;
+          const matchingEffect = existingEffectsByKey.get(key)?.shift();
+          if (matchingEffect) effectUpdates.push({ ...effect, _id: matchingEffect.id });
+          else effectsToCreate.push(effect);
+        }
+
+        if (effectUpdates.length > 0) {
+          await existingActor.updateEmbeddedDocuments('ActiveEffect', effectUpdates);
+        }
+        if (effectsToCreate.length > 0) {
+          await existingActor.createEmbeddedDocuments('ActiveEffect', effectsToCreate);
+        }
+        resultActor = existingActor;
+      } else {
+        resultActor = await Actor.create(actorData as any);
+        if (!resultActor) {
+          throw new Error(`Failed to create actor "${actorData.name}"`);
+        }
+
+        if (Array.isArray(incomingItems) && incomingItems.length > 0) {
+          await resultActor.createEmbeddedDocuments('Item', incomingItems as any[]);
+        }
+        if (Array.isArray(incomingEffects) && incomingEffects.length > 0) {
+          await resultActor.createEmbeddedDocuments('ActiveEffect', incomingEffects as any[]);
+        }
+      }
+
+      let tokensPlaced = 0;
+      if (request.addToScene) {
+        const scene = (game.scenes as any).active;
+        if (scene) {
+          const placement = request.placement || { type: 'center' };
+          const position = this.calculateTokenPosition(placement.type, scene, 0);
+          const tokenData = {
+            actorId: resultActor.id,
+            x: position.x,
+            y: position.y,
+          };
+          await scene.createEmbeddedDocuments('Token', [tokenData], {});
+          tokensPlaced = 1;
+        }
+      }
+
+      return {
+        success: true,
+        actor: {
+          id: resultActor.id as string,
+          name: resultActor.name as string,
+          type: resultActor.type,
+        },
+        updatedExisting,
+        tokensPlaced,
+      };
+    } catch (error) {
+      this.auditLog(
+        'createActorFromData',
+        request,
+        'failure',
+        error instanceof Error ? error.message : 'Unknown error'
+      );
+      throw error;
+    }
+  }
+
   /**
    * Remove embedded Items from an existing Actor.
    *
@@ -6072,6 +6280,83 @@ export class FoundryDataAccess {
     }
 
     return result;
+  }
+
+  /**
+   * Read a single world-level Item in full.
+   *
+   * `listWorldItems` returns index-level fields only, so there was no way to
+   * read back an item a GM had built in the sidebar: the bridge could create
+   * and update world items but never see their description or system data
+   * (#116). Resolves by id first, then by exact name, and refuses an ambiguous
+   * name rather than guessing which item was meant.
+   *
+   * Reads through `toObject()` rather than the live `system`, so Map-backed
+   * fields (dnd5e Activities) serialize as their stored source instead of
+   * collapsing to `{}`.
+   */
+  async getWorldItem(params: { itemIdentifier: string }): Promise<{
+    id: string;
+    name: string;
+    type: string;
+    img?: string;
+    folderId: string | null;
+    folderName: string | null;
+    system: Record<string, any>;
+    fullData: Record<string, any>;
+  }> {
+    this.validateFoundryState();
+
+    const identifier = (params?.itemIdentifier ?? '').trim();
+    if (!identifier) {
+      throw new Error('itemIdentifier is required');
+    }
+
+    const collection = (game as any).items;
+    let item = collection?.get?.(identifier) ?? null;
+
+    if (!item) {
+      const lowered = identifier.toLowerCase();
+      const all: any[] = collection?.contents ?? Array.from(collection ?? []);
+      const matches = all.filter(
+        (candidate: any) => (candidate?.name ?? '').toLowerCase() === lowered
+      );
+      if (matches.length > 1) {
+        throw new Error(
+          `Multiple world items are named "${identifier}". Pass an id instead: ` +
+            matches.map((candidate: any) => candidate.id).join(', ')
+        );
+      }
+      item = matches[0] ?? null;
+    }
+
+    if (!item) {
+      throw new Error(`World item not found: ${identifier}`);
+    }
+
+    const documentData = (item.toObject?.() ?? {}) as Record<string, any>;
+    const system = this.sanitizeData(documentData.system ?? {});
+    const fullData = this.sanitizeData(documentData);
+
+    // The sanitizer strips `advancement`, so restore it from source, as
+    // getCompendiumDocumentFull does.
+    if (Object.prototype.hasOwnProperty.call(documentData.system ?? {}, 'advancement')) {
+      const advancement = this.sanitizeData(documentData.system.advancement);
+      system.advancement = advancement;
+      fullData.system ??= {};
+      fullData.system.advancement = advancement;
+    }
+
+    return {
+      id: item.id ?? '',
+      name: item.name ?? '',
+      type: item.type,
+      ...(item.img ? { img: item.img } : {}),
+      folderId: item.folder?.id ?? null,
+      folderName: item.folder?.name ?? null,
+      system,
+      fullData,
+    };
   }
 
   /**

@@ -1,6 +1,7 @@
 import { MODULE_ID } from './constants.js';
 import { FoundryDataAccess } from './data-access.js';
 import { ComfyUIManager } from './comfyui-manager.js';
+import { guardQueryHandler } from './query-guard.js';
 
 export class QueryHandlers {
   public dataAccess: FoundryDataAccess;
@@ -57,6 +58,8 @@ export class QueryHandlers {
     // Phase 2 & 3: Write operation queries
     CONFIG.queries[`${modulePrefix}.createActorFromCompendium`] =
       this.handleCreateActorFromCompendium.bind(this);
+    CONFIG.queries[`${modulePrefix}.createActorFromData`] =
+      this.handleCreateActorFromData.bind(this);
     CONFIG.queries[`${modulePrefix}.getCompendiumDocumentFull`] =
       this.handleGetCompendiumDocumentFull.bind(this);
     CONFIG.queries[`${modulePrefix}.addActorsToScene`] = this.handleAddActorsToScene.bind(this);
@@ -127,6 +130,7 @@ export class QueryHandlers {
     // World-level item CRUD
     CONFIG.queries[`${modulePrefix}.createWorldItems`] = this.handleCreateWorldItems.bind(this);
     CONFIG.queries[`${modulePrefix}.listWorldItems`] = this.handleListWorldItems.bind(this);
+    CONFIG.queries[`${modulePrefix}.getWorldItem`] = this.handleGetWorldItem.bind(this);
     CONFIG.queries[`${modulePrefix}.updateWorldItems`] = this.handleUpdateWorldItems.bind(this);
     CONFIG.queries[`${modulePrefix}.getWorldItems`] = this.handleGetWorldItems.bind(this);
     CONFIG.queries[`${modulePrefix}.deleteWorldItems`] = this.handleDeleteWorldItems.bind(this);
@@ -178,6 +182,14 @@ export class QueryHandlers {
     CONFIG.queries[`${modulePrefix}.addSpellsToActor`] = this.handleAddSpellsToActor.bind(this);
     CONFIG.queries[`${modulePrefix}.addFeaturesFromCompendium`] =
       this.handleAddFeaturesFromCompendium.bind(this);
+
+    // SECURITY: these handlers are reachable by any connected user through Foundry's
+    // User#query, so only accept those calls from a GM. See query-guard.ts.
+    for (const key of Object.keys(CONFIG.queries)) {
+      if (key.startsWith(`${modulePrefix}.`)) {
+        CONFIG.queries[key] = guardQueryHandler(key, CONFIG.queries[key]);
+      }
+    }
   }
 
   /**
@@ -1126,6 +1138,63 @@ export class QueryHandlers {
     }
   }
 
+  private async handleCreateActorFromData(data: {
+    actorData: Record<string, unknown>;
+    addToScene?: boolean;
+    updateExisting?: boolean;
+    existingActorIdentifier?: string;
+    preserveItemTypes?: string[];
+    placement?: {
+      type: 'random' | 'grid' | 'center' | 'coordinates';
+      coordinates?: { x: number; y: number }[];
+    };
+  }): Promise<any> {
+    try {
+      // SECURITY: Silent GM validation
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+
+      if (!data?.actorData || typeof data.actorData !== 'object') {
+        throw new Error('actorData object is required');
+      }
+
+      const requestData: {
+        actorData: Record<string, unknown>;
+        addToScene?: boolean;
+        updateExisting?: boolean;
+        existingActorIdentifier?: string;
+        preserveItemTypes?: string[];
+        placement?: {
+          type: 'random' | 'grid' | 'center' | 'coordinates';
+          coordinates?: { x: number; y: number }[];
+        };
+      } = {
+        actorData: data.actorData,
+        addToScene: data.addToScene ?? false,
+        updateExisting: data.updateExisting ?? false,
+      };
+      if (data.existingActorIdentifier) {
+        requestData.existingActorIdentifier = data.existingActorIdentifier;
+      }
+      if (data.preserveItemTypes?.length) {
+        requestData.preserveItemTypes = data.preserveItemTypes;
+      }
+      if (data.placement) {
+        requestData.placement = data.placement;
+      }
+
+      return await this.dataAccess.createActorFromData(requestData);
+    } catch (error) {
+      throw new Error(
+        `Failed to create actor from data: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
   private async handleUpdateSceneMusic(data: any): Promise<any> {
     try {
       const gmCheck = this.validateGMAccess();
@@ -1807,6 +1876,27 @@ export class QueryHandlers {
     } catch (error) {
       throw new Error(
         `Failed to list world items: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  private async handleGetWorldItem(data: { itemIdentifier: string }): Promise<any> {
+    try {
+      const gmCheck = this.validateGMAccess();
+      if (!gmCheck.allowed) {
+        return { error: 'Access denied', success: false };
+      }
+
+      this.dataAccess.validateFoundryState();
+
+      if (!data?.itemIdentifier) {
+        throw new Error('itemIdentifier is required');
+      }
+
+      return await this.dataAccess.getWorldItem({ itemIdentifier: data.itemIdentifier });
+    } catch (error) {
+      throw new Error(
+        `Failed to get world item: ${error instanceof Error ? error.message : 'Unknown error'}`
       );
     }
   }

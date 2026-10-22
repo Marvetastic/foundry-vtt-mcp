@@ -3,6 +3,7 @@ import {
   buildTemplate,
   describeField,
   describeNimbleRules,
+  findChoiceProblems,
   validateRuleSource,
 } from './nimble-rules.js';
 
@@ -172,5 +173,29 @@ describe('describeNimbleRules', () => {
     expect(one.rule.notes.join(' ')).toContain('"max" | "zero" (NOT "full")');
     expect(() => describeNimbleRules({ type: 'zap' })).toThrow(/Known types: chargePool/);
     expect(describeNimbleRules({}).ruleTypes).toHaveLength(1);
+  });
+});
+
+describe('findChoiceProblems', () => {
+  const fields: any[] = [
+    { name: 'initial', kind: 'StringField', choices: ['max', 'zero'] },
+    {
+      name: 'recoveries',
+      kind: 'ArrayField',
+      element: { fields: [{ name: 'mode', kind: 'StringField', choices: ['add', 'set'] }] },
+    },
+  ];
+
+  it('names a top-level value outside its choices', () => {
+    expect(findChoiceProblems(fields, { initial: 'full' })).toEqual([
+      'initial: "full" is not one of max, zero',
+    ]);
+  });
+
+  it('recurses into array elements and ignores valid or absent values', () => {
+    expect(findChoiceProblems(fields, { initial: 'max', recoveries: [{ mode: 'nope' }] })).toEqual([
+      'recoveries[0].mode: "nope" is not one of add, set',
+    ]);
+    expect(findChoiceProblems(fields, {})).toEqual([]);
   });
 });
