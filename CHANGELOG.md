@@ -1,3 +1,31 @@
+## Unreleased
+
+### New Features
+
+- **DSA5 character import from JSON** (#92) — `import-dsa5-actor-from-json` creates a DSA5 actor from a Dark Aid export, an Optolith-style or custom DSA5 JSON, or a raw Foundry actor export, passed inline or as a `.json` / `.tdc` file (10 MB limit). Re-importing with `updateExisting` updates the existing actor, its items and effects instead of creating a duplicate. Item matching against compendiums currently works in German-language worlds only. DSA5 worlds only.
+
+## v0.8.5 (2026-10-17)
+
+### New Features
+
+- **`manage-world-items` gains `get`** (#116, fixed in #119) — read one world-level Item in full (description, system data, rules) by id or exact name. World items could previously be created, listed and updated but never read back. An ambiguous name is refused with the candidate ids rather than guessed.
+
+- **`get-character` can read an unlinked token's own state** (#111, #113) — pass a token ID or token UUID to get that token's effective stats and effects, such as a summon or one copy of a shared NPC, rather than the base actor's
+
+- **PF2e languages in `get-character`** (#112) — `stats.languages` lists the actor's language slugs plus the sheet's free-text note; omitted when the actor has none
+
+### Fixes
+
+- **Security: bridge queries are only accepted from GM users** (#121) — the GM check on the module's query handlers now applies to the user who sent the request, not only to the client running it. Updating is recommended.
+
+- **PF2e rule elements and ActiveEffect changes were missing their `key`** (#119) — the data sanitizer stripped every field named `key`, so rule element types (such as `FlatModifier`) and effect change paths were absent from `get-character`, `get-character-entity` and `get-compendium-entry-full`
+
+- **dnd5e Activity save configuration and Advancement data were dropped** from detailed item and compendium reads (#110)
+
+### Docs
+
+- **Manual install config instructions corrected** (#120) — add the `foundry-mcp` entry inside an existing `mcpServers` object rather than pasting a second top-level block, and `FOUNDRY_HOST` / `FOUNDRY_PORT` are no longer shown, since the host is unused and the port must match the bridge's
+
 ## v0.8.4 (2026-09-12)
 
 ### New Features

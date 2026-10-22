@@ -213,7 +213,9 @@ export function validateRuleSource(
   const Cls = models[type];
   if (!Cls) return { valid: false, problems: [`Unknown rule type "${type}"`] };
   try {
-    const rule = new Cls({ ...source, type }, { strict: true });
+    // Non-strict construction records failures on the model; strict throws from Foundry
+    // internals ('reading name' of a missing parent) when the rule has no parent item.
+    const rule = new Cls({ ...source, type }, { strict: false });
     if (!rule.invalid) return { valid: true, problems: [] };
     const failures: Array<{ unresolved?: boolean; toString(): string }> = Object.values(
       rule.validationFailures ?? {}
